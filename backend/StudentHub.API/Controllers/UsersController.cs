@@ -1,7 +1,7 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using StudentHub.API.Data;
-using StudentHub.API.Models;
+using StudentHub.API.DTOs;
 
 namespace StudentHub.API.Controllers;
 
@@ -18,22 +18,20 @@ public class UsersController : ControllerBase
 
     // GET: api/users
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<User>>> GetUsers()
+    public async Task<ActionResult<IEnumerable<UserResponseDto>>> GetUsers()
     {
-        return await _context.Users.ToListAsync();
-    }
+        var users = await _context.Users
+            .Select(u => new UserResponseDto(
+                u.Id,
+                u.Email,
+                u.FullName,
+                u.Role,
+                u.TrustScore,
+                u.UniversityEmailVerified,
+                u.CreatedAt
+            ))
+            .ToListAsync();
 
-    // POST: api/users
-    [HttpPost]
-    public async Task<ActionResult<User>> CreateUser(User user)
-    {
-        _context.Users.Add(user);
-        await _context.SaveChangesAsync();
-
-        return CreatedAtAction(
-            nameof(GetUsers),
-            new { id = user.Id },
-            user
-        );
+        return Ok(users);
     }
 }

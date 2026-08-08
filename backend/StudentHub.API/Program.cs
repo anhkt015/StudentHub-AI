@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+ï»¿using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using StudentHub.API.Data;
@@ -6,16 +6,17 @@ using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// K?t n?i Entity Framework Core v?i PostgreSQL/Supabase
+// PostgreSQL / Supabase
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection")
-    ));
+    )
+);
 
-// Ðang ký Controllers
+// Controllers
 builder.Services.AddControllers();
 
-// C?u hình JWT Authentication
+// JWT Authentication
 var jwtKey = builder.Configuration["Jwt:Key"]
     ?? throw new InvalidOperationException("JWT Key is not configured.");
 
@@ -61,7 +62,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-// Authentication ph?i ch?y tru?c Authorization
+// Authentication must run before Authorization
 app.UseAuthentication();
 app.UseAuthorization();
 
