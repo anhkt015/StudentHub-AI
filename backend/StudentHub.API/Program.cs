@@ -1,4 +1,6 @@
-﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿AppContext.SetSwitch('Microsoft.Extensions.Configuration.FileSystemWatcher', false);
+
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using StudentHub.API.Data;
@@ -112,3 +114,4 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
