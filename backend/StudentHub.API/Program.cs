@@ -1,10 +1,10 @@
-﻿AppContext.SetSwitch('Microsoft.Extensions.Configuration.FileSystemWatcher', false);
-
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using StudentHub.API.Data;
 using StudentHub.API.Services.Verification;
+
+AppContext.SetSwitch("Microsoft.Extensions.Configuration.FileSystemWatcher", false);
 
 var builder = WebApplication.CreateBuilder(args);
 
