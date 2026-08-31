@@ -24,7 +24,7 @@ builder.Services.AddControllers();
 builder.Services.AddHttpClient();
 
 builder.Services.AddScoped<ILayer2VerificationService, Layer2VerificationService>();
-
+builder.Services.AddScoped<ILayer3VerificationService, Layer3VerificationService>();
 // ============================================================
 // SUPABASE JWT AUTHENTICATION
 // ============================================================
