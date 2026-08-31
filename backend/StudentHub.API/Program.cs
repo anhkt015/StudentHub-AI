@@ -1,8 +1,10 @@
-﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using StudentHub.API.Data;
 using StudentHub.API.Services.Verification;
+
+Environment.SetEnvironmentVariable("DOTNET_USE_POLLING_FILE_WATCHER","1");
 
 var builder = WebApplication.CreateBuilder(args);
 
