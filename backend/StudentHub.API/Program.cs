@@ -24,6 +24,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddControllers();
 builder.Services.AddHttpClient();
+builder.Services.AddScoped<ILayer4VerificationService, Layer4VerificationService>();
 
 builder.Services.AddScoped<ILayer2VerificationService, Layer2VerificationService>();
 builder.Services.AddScoped<ILayer3VerificationService, Layer3VerificationService>();
