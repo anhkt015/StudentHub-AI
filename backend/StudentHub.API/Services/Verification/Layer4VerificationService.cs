@@ -38,13 +38,188 @@ public class Layer4VerificationService : ILayer4VerificationService
         if (layer3 == null)
             return Unknown("Layer 3 result is required.");
 
+        type = type.Trim().ToLowerInvariant();
+        content = content.Trim();
         mode = NormalizeMode(mode);
+
+        /*
+         * =========================================================
+         * API KEYS
+         * =========================================================
+         */
+
+        var tavilyKey =
+            _configuration["TAVILY_API_KEY"];
 
         var geminiKey =
             _configuration["GEMINI_API_KEY"];
 
         var groqKey =
             _configuration["GROQ_API_KEY"];
+
+
+        /*
+         * =========================================================
+         * LAYER 4 RESEARCH
+         * =========================================================
+         *
+         * Layer 3 dã search m?t l?n.
+         *
+         * Layer 4 KHÔNG ch? tin Layer 3.
+         *
+         * Nó th?c hi?n m?t research riêng b?ng Tavily.
+         *
+         * Ðây là research d?c l?p tru?c khi AI suy lu?n.
+         */
+
+        var research =
+            await ResearchAsync(
+                tavilyKey,
+                type,
+                content
+            );
+
+
+        /*
+         * =========================================================
+         * COMBINE EVIDENCE
+         * =========================================================
+         *
+         * AI nh?n:
+         *
+         * 1. Layer 3 evidence
+         * 2. Layer 3 sources
+         * 3. Layer 4 research evidence
+         * 4. Layer 4 research sources
+         *
+         * AI không t? b?a ngu?n.
+         */
+
+        var layer3Evidence =
+            layer3.Evidence
+                .Where(x =>
+                    !string.IsNullOrWhiteSpace(x.Url))
+                .Select(x => new EvidenceItem
+                {
+                    Title = x.Title,
+                    Url = x.Url,
+                    Content = LimitText(
+                        x.Content,
+                        5000
+                    ),
+                    Origin = "Layer 3"
+                })
+                .ToList();
+
+        var researchEvidence =
+            research.Evidence;
+
+        var allEvidence =
+            layer3Evidence
+                .Concat(researchEvidence)
+                .GroupBy(
+                    x => x.Url,
+                    StringComparer.OrdinalIgnoreCase
+                )
+                .Select(g => g.First())
+                .Take(16)
+                .ToList();
+
+
+        var allSources =
+            layer3.Sources
+                .Where(x =>
+                    !string.IsNullOrWhiteSpace(x.Url))
+                .Select(x => new Layer4Source(
+                    $"[Layer 3] {x.Title}",
+                    x.Url))
+                .Concat(
+                    research.Sources
+                        .Where(x =>
+                            !string.IsNullOrWhiteSpace(x.Url))
+                        .Select(x => new Layer4Source(
+                            x.Title.StartsWith(
+                                "[Layer 4 Research]",
+                                StringComparison.OrdinalIgnoreCase)
+                                ? x.Title
+                                : $"[Layer 4 Research] {x.Title}",
+                            x.Url))
+                )
+                .GroupBy(
+                    x => x.Url,
+                    StringComparer.OrdinalIgnoreCase
+                )
+                .Select(g => g.First())
+                .Take(20)
+                .ToList();
+
+
+        /*
+         * =========================================================
+         * MODEL SELECTION
+         * =========================================================
+         *
+         * USER
+         *   -> Groq ONLY
+         *
+         * EXPERT / PRO
+         *   -> Gemini ONLY
+         *
+         * KHÔNG g?i hai model trong cùng m?t request.
+         */
+
+        if (mode == "user")
+        {
+            if (string.IsNullOrWhiteSpace(groqKey))
+            {
+                return Unknown(
+                    "GROQ_API_KEY is not configured."
+                );
+            }
+
+            var groq =
+                await TryGroqAsync(
+                    groqKey,
+                    type,
+                    content,
+                    layer3,
+                    allEvidence,
+                    allSources
+                );
+
+            if (groq == null)
+            {
+                return Unknown(
+                    "Groq was unavailable."
+                );
+            }
+
+            return BuildResult(
+                groq.Verdict,
+                groq.Confidence,
+                groq.EvidenceAgreement,
+                groq.SourceQuality,
+                groq.Reason,
+                groq.ContradictoryEvidence,
+                allSources,
+                mode,
+                "none",
+                GroqModel
+            );
+        }
+
+
+        /*
+         * =========================================================
+         * EXPERT / PRO
+         * =========================================================
+         *
+         * Ch? Gemini.
+         *
+         * 3.7 -> fallback 3.6
+         *
+         * Không g?i Groq.
+         */
 
         if (string.IsNullOrWhiteSpace(geminiKey))
         {
@@ -53,158 +228,220 @@ public class Layer4VerificationService : ILayer4VerificationService
             );
         }
 
-        /*
-         * =========================================================
-         * 1. GROQ
-         * =========================================================
-         *
-         * Groq KHÔNG nhận toàn bộ Layer 3.
-         *
-         * Chỉ lấy các evidence quan trọng nhất.
-         */
-
-        var filteredEvidence =
-            SelectImportantEvidence(
-                layer3.Evidence,
-                6,
-                1600
-            );
-
-        var filteredSources =
-            SelectImportantSources(
-                layer3.Sources,
-                6
-            );
-
-        GroqAnalysis? groqResult = null;
-
-        if (!string.IsNullOrWhiteSpace(groqKey))
-        {
-            groqResult =
-                await TryGroqAsync(
-                    groqKey,
-                    type,
-                    content,
-                    layer3,
-                    filteredEvidence,
-                    filteredSources
-                );
-        }
-
-        /*
-         * =========================================================
-         * 2. GEMINI
-         * =========================================================
-         *
-         * Gemini nhận FULL evidence từ Layer 3.
-         *
-         * Model 3.7 -> nếu quota/rate limit
-         * Model 3.6 -> fallback.
-         */
-
-        var fullEvidence =
-            layer3.Evidence
-                .Where(x =>
-                    !string.IsNullOrWhiteSpace(x.Url))
-                .Select(x => new
-                {
-                    title = x.Title,
-                    url = x.Url,
-                    content = x.Content
-                })
-                .ToList();
-
-        var fullSources =
-            layer3.Sources
-                .Where(x =>
-                    !string.IsNullOrWhiteSpace(x.Url))
-                .Select(x => new
-                {
-                    title = x.Title,
-                    url = x.Url
-                })
-                .ToList();
-
         var gemini =
             await TryGeminiWithFallbackAsync(
                 geminiKey,
-                mode,
                 type,
                 content,
+                mode,
                 layer3,
-                fullEvidence,
-                fullSources,
-                groqResult
+                allEvidence,
+                allSources
             );
 
         if (gemini == null)
         {
             return Unknown(
-                "Both Gemini 3.7 Flash and Gemini 3.6 Flash were unavailable."
+                "Gemini 3.7 Flash and Gemini 3.6 Flash were unavailable."
             );
         }
 
-        var verdict =
-            NormalizeVerdict(
-                gemini.Verdict
-            );
-
-        var confidence =
-            Clamp(
-                gemini.Confidence
-            );
-
-        var agreement =
-            Clamp(
-                gemini.EvidenceAgreement
-            );
-
-        var sourceQuality =
-            Clamp(
-                gemini.SourceQuality
-            );
-
-        /*
-         * Backend tự quyết định STOP.
-         */
-
-        var stop =
-            verdict != "UNKNOWN" &&
-            confidence >= 0.90 &&
-            agreement >= 0.85;
-
-        var validSources =
-            gemini.Sources
-                .Where(x =>
-                    !string.IsNullOrWhiteSpace(x.Url) &&
-                    layer3.Sources.Any(
-                        s =>
-                            s.Url.Equals(
-                                x.Url,
-                                StringComparison.OrdinalIgnoreCase
-                            )
-                    )
-                )
-                .Take(10)
-                .ToList();
-
-        return new Layer4VerificationResult(
-            verdict,
-            confidence,
-            agreement,
-            sourceQuality,
-            stop,
-            !stop,
+        return BuildResult(
+            gemini.Verdict,
+            gemini.Confidence,
+            gemini.EvidenceAgreement,
+            gemini.SourceQuality,
+            gemini.Reason,
+            gemini.ContradictoryEvidence,
+            allSources,
             mode,
             gemini.Model,
-            groqResult?.Model,
-            gemini.Reason ??
-                "Layer 4 analysis completed.",
-            gemini.ContradictoryEvidence ??
-                new List<string>(),
-            validSources
+            null
         );
     }
+
+
+    /*
+     * =============================================================
+     * LAYER 4 RESEARCH
+     * =============================================================
+     *
+     * Ðây là research m?i c?a Layer 4.
+     *
+     * Layer 3 search #1
+     * Layer 4 search #2
+     *
+     * Không ph?i AI search.
+     * Tavily th?c hi?n web research.
+     *
+     * Sau dó M?T AI s? suy lu?n t? toàn b? evidence.
+     */
+
+    private async Task<ResearchResult> ResearchAsync(
+        string? apiKey,
+        string type,
+        string claim)
+    {
+        var result =
+            new ResearchResult();
+
+        if (string.IsNullOrWhiteSpace(apiKey))
+            return result;
+
+        try
+        {
+            var client =
+                _httpClientFactory.CreateClient();
+
+            client.Timeout =
+                TimeSpan.FromSeconds(30);
+
+
+            /*
+             * Query khác Layer 3 m?t chút d? tang
+             * kh? nang tìm evidence d?c l?p.
+             */
+
+            var query =
+                type == "url"
+                    ? $"fact check verify {claim}"
+                    : $"fact check evidence verify \"{claim}\"";
+
+
+            var requestBody = new
+            {
+                api_key = apiKey,
+                query = query,
+                search_depth = "advanced",
+                max_results = 8,
+                include_answer = true,
+                include_raw_content = false,
+                include_images = false
+            };
+
+
+            var json =
+                JsonSerializer.Serialize(
+                    requestBody
+                );
+
+
+            using var request =
+                new HttpRequestMessage(
+                    HttpMethod.Post,
+                    "https://api.tavily.com/search"
+                );
+
+
+            request.Content =
+                new StringContent(
+                    json,
+                    Encoding.UTF8,
+                    "application/json"
+                );
+
+
+            using var response =
+                await client.SendAsync(request);
+
+
+            var responseBody =
+                await response.Content.ReadAsStringAsync();
+
+
+            if (!response.IsSuccessStatusCode)
+                return result;
+
+
+            using var document =
+                JsonDocument.Parse(
+                    responseBody
+                );
+
+
+            var root =
+                document.RootElement;
+
+
+            if (root.TryGetProperty(
+                    "results",
+                    out var resultsElement) &&
+                resultsElement.ValueKind ==
+                    JsonValueKind.Array)
+            {
+                foreach (
+                    var item in
+                    resultsElement.EnumerateArray())
+                {
+                    var title =
+                        item.TryGetProperty(
+                            "title",
+                            out var titleElement)
+                            ? titleElement.GetString()
+                            ?? "Untitled"
+                            : "Untitled";
+
+
+                    var url =
+                        item.TryGetProperty(
+                            "url",
+                            out var urlElement)
+                            ? urlElement.GetString()
+                            ?? ""
+                            : "";
+
+
+                    var text =
+                        item.TryGetProperty(
+                            "content",
+                            out var contentElement)
+                            ? contentElement.GetString()
+                            : null;
+
+
+                    if (string.IsNullOrWhiteSpace(url))
+                        continue;
+
+
+                    result.Evidence.Add(
+                        new EvidenceItem
+                        {
+                            Title = title,
+                            Url = url,
+                            Content = LimitText(
+                                text,
+                                5000
+                            ),
+                            Origin =
+                                "Layer 4 Research"
+                        }
+                    );
+
+
+                    result.Sources.Add(
+                        new Layer4Source(
+                            $"[Layer 4 Research] {title}",
+                            url
+                        )
+                    );
+                }
+            }
+
+
+            return result;
+        }
+        catch
+        {
+            /*
+             * Research failure KHÔNG làm Layer 4 ch?t.
+             *
+             * AI v?n có th? suy lu?n t? Layer 3.
+             */
+
+            return result;
+        }
+    }
+
 
     /*
      * =============================================================
@@ -212,21 +449,23 @@ public class Layer4VerificationService : ILayer4VerificationService
      * =============================================================
      */
 
-    private async Task<GeminiAnalysis?> TryGeminiWithFallbackAsync(
-        string apiKey,
-        string mode,
-        string type,
-        string claim,
-        Layer4Layer3Input layer3,
-        object fullEvidence,
-        object fullSources,
-        GroqAnalysis? groq)
+    private async Task<GeminiAnalysis?>
+        TryGeminiWithFallbackAsync(
+            string apiKey,
+            string type,
+            string claim,
+            string mode,
+            Layer4Layer3Input layer3,
+            List<EvidenceItem> evidence,
+            List<Layer4Source> sources)
     {
-        var models = new[]
-        {
-            Gemini37,
-            Gemini36
-        };
+        var models =
+            new[]
+            {
+                Gemini37,
+                Gemini36
+            };
+
 
         foreach (var model in models)
         {
@@ -234,32 +473,34 @@ public class Layer4VerificationService : ILayer4VerificationService
                 await TryGeminiAsync(
                     apiKey,
                     model,
-                    mode,
                     type,
                     claim,
+                    mode,
                     layer3,
-                    fullEvidence,
-                    fullSources,
-                    groq
+                    evidence,
+                    sources
                 );
+
 
             if (result != null)
                 return result;
         }
 
+
         return null;
     }
 
-    private async Task<GeminiAnalysis?> TryGeminiAsync(
-        string apiKey,
-        string model,
-        string mode,
-        string type,
-        string claim,
-        Layer4Layer3Input layer3,
-        object fullEvidence,
-        object fullSources,
-        GroqAnalysis? groq)
+
+    private async Task<GeminiAnalysis?>
+        TryGeminiAsync(
+            string apiKey,
+            string model,
+            string type,
+            string claim,
+            string mode,
+            Layer4Layer3Input layer3,
+            List<EvidenceItem> evidence,
+            List<Layer4Source> sources)
     {
         try
         {
@@ -269,30 +510,50 @@ public class Layer4VerificationService : ILayer4VerificationService
             client.Timeout =
                 TimeSpan.FromSeconds(60);
 
+
             var systemPrompt = """
 You are Layer 4 of StudentHub AI Trust.
 
-You are the final expert verification model.
+You are the FINAL verification model.
+
+Your task is to independently determine whether a claim is TRUE,
+FAKE, MISLEADING, or UNKNOWN.
 
 You receive:
-1. The user's submitted claim.
-2. FULL evidence collected by Layer 3.
-3. FULL source list collected by Layer 3.
-4. An optional secondary Groq analysis.
+
+1. The original user claim.
+2. The result produced by Layer 3.
+3. Evidence collected by Layer 3.
+4. Additional independent web research performed by Layer 4.
 
 IMPORTANT:
 
-Use ONLY the supplied evidence and sources.
+Layer 3 is NOT automatically correct.
+
+Layer 3 may say UNKNOWN.
+That does NOT mean you must return UNKNOWN.
+
+You must independently reason over ALL supplied evidence.
+
+Compare:
+- Layer 3 evidence
+- Layer 4 research evidence
+- source quality
+- agreement between sources
+- contradictions
+- wording of the claim
+
+Do NOT blindly follow Layer 3.
+
+Do NOT invent facts.
 
 Do NOT invent sources.
+
 Do NOT invent URLs.
-Do NOT claim that you browsed the internet.
-Do NOT fabricate facts.
 
-Gemini has priority over Groq.
+Do NOT claim that you personally browsed the internet.
 
-Groq is only a secondary cross-check.
-Do not blindly follow Groq.
+Use only the supplied evidence.
 
 Verdicts:
 
@@ -302,35 +563,31 @@ MISLEADING
 UNKNOWN
 
 TRUE:
-The supplied evidence strongly supports the claim.
+Evidence strongly supports the claim.
 
 FAKE:
-The supplied evidence strongly contradicts the claim.
+Evidence strongly contradicts the claim.
 
 MISLEADING:
-The claim contains partially true information,
-important missing context, or a mixture of true and false elements.
+The claim contains some truth but omits important context,
+uses misleading wording, exaggerates, or combines true and false elements.
 
 UNKNOWN:
-Evidence is insufficient or contradictory.
+Available evidence is insufficient or genuinely contradictory.
 
-Evaluate:
+Important:
 
-confidence:
-0 to 1
+A claim containing words such as:
+"always"
+"never"
+"exactly"
+"100%"
+"guaranteed"
+"proves"
 
-evidenceAgreement:
-0 to 1
+requires especially strong evidence.
 
-sourceQuality:
-0 to 1
-
-Prefer sources from:
-- government institutions
-- universities
-- scientific organizations
-- official organizations
-- established reputable news organizations
+Do not treat weak evidence as sufficient for absolute claims.
 
 Return ONLY valid JSON.
 
@@ -343,18 +600,14 @@ Required structure:
   "sourceQuality": 0.90,
   "reason": "Short evidence-based explanation",
   "contradictoryEvidence": [],
-  "sources": [
-    {
-      "title": "Source title",
-      "url": "https://example.com"
-    }
-  ]
+  "sources": []
 }
 
-The sources array may ONLY contain URLs supplied by Layer 3.
+The sources field must ONLY contain URLs supplied in the input.
 """;
 
-            var userPayload =
+
+            var payload =
                 new
                 {
                     mode,
@@ -365,58 +618,55 @@ The sources array may ONLY contain URLs supplied by Layer 3.
                     {
                         verdict = layer3.Verdict,
                         confidence = layer3.Confidence,
-                        reason = layer3.Reason,
-
-                        /*
-                         * FULL evidence.
-                         */
-
-                        evidence = fullEvidence,
-                        sources = fullSources
+                        reason = layer3.Reason
                     },
 
-                    /*
-                     * Groq is secondary evidence only.
-                     */
+                    evidence,
 
-                    groq
+                    sources
                 };
+
 
             var requestBody =
                 new
                 {
-                    contents = new[]
-                    {
+                    contents =
+                        new[]
+                        {
+                            new
+                            {
+                                role = "user",
+                                parts =
+                                    new[]
+                                    {
+                                        new
+                                        {
+                                            text =
+                                                systemPrompt +
+                                                "\n\nINPUT:\n" +
+                                                JsonSerializer.Serialize(
+                                                    payload
+                                                )
+                                        }
+                                    }
+                            }
+                        },
+
+                    generationConfig =
                         new
                         {
-                            role = "user",
-                            parts = new[]
-                            {
-                                new
-                                {
-                                    text =
-                                        systemPrompt +
-                                        "\n\nINPUT:\n" +
-                                        JsonSerializer.Serialize(
-                                            userPayload
-                                        )
-                                }
-                            }
+                            temperature = 0.1,
+                            responseMimeType =
+                                "application/json"
                         }
-                    },
-
-                    generationConfig = new
-                    {
-                        temperature = 0.1,
-                        responseMimeType =
-                            "application/json"
-                    }
                 };
+
 
             var json =
                 JsonSerializer.Serialize(
                     requestBody
                 );
+
 
             using var request =
                 new HttpRequestMessage(
@@ -424,10 +674,12 @@ The sources array may ONLY contain URLs supplied by Layer 3.
                     $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
                 );
 
+
             request.Headers.Add(
                 "x-goog-api-key",
                 apiKey
             );
+
 
             request.Content =
                 new StringContent(
@@ -436,19 +688,16 @@ The sources array may ONLY contain URLs supplied by Layer 3.
                     "application/json"
                 );
 
+
             using var response =
                 await client.SendAsync(
                     request
                 );
 
+
             var responseBody =
                 await response.Content.ReadAsStringAsync();
 
-            /*
-             * 429 = quota/rate limit.
-             *
-             * Caller sẽ thử Gemini 3.6.
-             */
 
             if (response.StatusCode ==
                 HttpStatusCode.TooManyRequests)
@@ -456,18 +705,20 @@ The sources array may ONLY contain URLs supplied by Layer 3.
                 return null;
             }
 
+
             if (!response.IsSuccessStatusCode)
-            {
                 return null;
-            }
+
 
             using var document =
                 JsonDocument.Parse(
                     responseBody
                 );
 
+
             var root =
                 document.RootElement;
+
 
             if (!root.TryGetProperty(
                     "candidates",
@@ -479,6 +730,7 @@ The sources array may ONLY contain URLs supplied by Layer 3.
                 return null;
             }
 
+
             var text =
                 candidates[0]
                     .GetProperty("content")
@@ -486,8 +738,10 @@ The sources array may ONLY contain URLs supplied by Layer 3.
                     .GetProperty("text")
                     .GetString();
 
+
             if (string.IsNullOrWhiteSpace(text))
                 return null;
+
 
             var result =
                 JsonSerializer.Deserialize<GeminiAnalysis>(
@@ -498,10 +752,14 @@ The sources array may ONLY contain URLs supplied by Layer 3.
                     }
                 );
 
+
             if (result == null)
                 return null;
 
-            result.Model = model;
+
+            result.Model =
+                model;
+
 
             return result;
         }
@@ -511,19 +769,29 @@ The sources array may ONLY contain URLs supplied by Layer 3.
         }
     }
 
+
     /*
      * =============================================================
      * GROQ
      * =============================================================
+     *
+     * USER MODE:
+     *
+     * Tavily research
+     *      ?
+     * Groq
+     *
+     * Không Gemini.
      */
 
-    private async Task<GroqAnalysis?> TryGroqAsync(
-        string apiKey,
-        string type,
-        string claim,
-        Layer4Layer3Input layer3,
-        List<object> evidence,
-        List<object> sources)
+    private async Task<GroqAnalysis?>
+        TryGroqAsync(
+            string apiKey,
+            string type,
+            string claim,
+            Layer4Layer3Input layer3,
+            List<EvidenceItem> evidence,
+            List<Layer4Source> sources)
     {
         try
         {
@@ -533,31 +801,71 @@ The sources array may ONLY contain URLs supplied by Layer 3.
             client.Timeout =
                 TimeSpan.FromSeconds(45);
 
+
             var systemPrompt = """
-You are the secondary verification model of StudentHub AI Trust.
+You are Layer 4 of StudentHub AI Trust.
 
-Analyze ONLY the selected evidence supplied to you.
+You are the final verification model.
 
-Do not browse.
-Do not invent sources.
-Do not invent URLs.
+Independently evaluate the user's claim using:
+1. Layer 3 result
+2. Layer 3 evidence
+3. Additional Layer 4 web research
+
+Layer 3 is NOT automatically correct.
+
+If Layer 3 says UNKNOWN, you MUST still analyze the supplied
+Layer 3 evidence and Layer 4 research.
+
+Do NOT simply repeat Layer 3.
+
+Do NOT invent facts.
+
+Do NOT invent sources.
+
+Do NOT invent URLs.
+
+Do NOT claim to have browsed the internet yourself.
+
+Use ONLY the supplied evidence.
+
+Verdicts:
+
+TRUE
+FAKE
+MISLEADING
+UNKNOWN
+
+TRUE:
+Strong evidence supports the claim.
+
+FAKE:
+Strong evidence contradicts the claim.
+
+MISLEADING:
+The claim is partly true, exaggerated, incomplete,
+or misleadingly worded.
+
+UNKNOWN:
+Evidence is insufficient or genuinely contradictory.
+
+Absolute wording such as:
+always, never, exactly, guaranteed, 100%
+
+requires especially strong evidence.
 
 Return ONLY JSON.
 
 {
   "verdict": "TRUE",
-  "confidence": 0.90,
-  "evidenceAgreement": 0.90,
-  "sourceQuality": 0.85,
-  "reason": "Short explanation"
+  "confidence": 0.95,
+  "evidenceAgreement": 0.92,
+  "sourceQuality": 0.90,
+  "reason": "Short explanation",
+  "contradictoryEvidence": []
 }
-
-Possible verdicts:
-TRUE
-FAKE
-MISLEADING
-UNKNOWN
 """;
+
 
             var payload =
                 new
@@ -565,50 +873,60 @@ UNKNOWN
                     type,
                     claim,
 
-                    /*
-                     * IMPORTANT:
-                     * Groq receives FILTERED evidence only.
-                     */
+                    layer3 = new
+                    {
+                        verdict = layer3.Verdict,
+                        confidence = layer3.Confidence,
+                        reason = layer3.Reason
+                    },
 
                     evidence,
+
                     sources
                 };
+
 
             var requestBody =
                 new
                 {
                     model = GroqModel,
 
-                    messages = new object[]
-                    {
-                        new
+                    messages =
+                        new object[]
                         {
-                            role = "system",
-                            content = systemPrompt
+                            new
+                            {
+                                role = "system",
+                                content = systemPrompt
+                            },
+
+                            new
+                            {
+                                role = "user",
+                                content =
+                                    JsonSerializer.Serialize(
+                                        payload
+                                    )
+                            }
                         },
-                        new
-                        {
-                            role = "user",
-                            content =
-                                JsonSerializer.Serialize(
-                                    payload
-                                )
-                        }
-                    },
 
                     temperature = 0.1,
-                    max_completion_tokens = 500,
 
-                    response_format = new
-                    {
-                        type = "json_object"
-                    }
+                    max_completion_tokens = 700,
+
+                    response_format =
+                        new
+                        {
+                            type = "json_object"
+                        }
                 };
+
 
             var json =
                 JsonSerializer.Serialize(
                     requestBody
                 );
+
 
             using var request =
                 new HttpRequestMessage(
@@ -616,11 +934,13 @@ UNKNOWN
                     "https://api.groq.com/openai/v1/chat/completions"
                 );
 
+
             request.Headers.Authorization =
                 new AuthenticationHeaderValue(
                     "Bearer",
                     apiKey
                 );
+
 
             request.Content =
                 new StringContent(
@@ -629,13 +949,16 @@ UNKNOWN
                     "application/json"
                 );
 
+
             using var response =
                 await client.SendAsync(
                     request
                 );
 
+
             var body =
                 await response.Content.ReadAsStringAsync();
+
 
             if (response.StatusCode ==
                 HttpStatusCode.TooManyRequests)
@@ -643,22 +966,29 @@ UNKNOWN
                 return null;
             }
 
+
             if (!response.IsSuccessStatusCode)
                 return null;
+
 
             using var document =
                 JsonDocument.Parse(body);
 
+
             var root =
                 document.RootElement;
+
 
             if (!root.TryGetProperty(
                     "choices",
                     out var choices) ||
+                choices.ValueKind !=
+                    JsonValueKind.Array ||
                 choices.GetArrayLength() == 0)
             {
                 return null;
             }
+
 
             var output =
                 choices[0]
@@ -666,8 +996,10 @@ UNKNOWN
                     .GetProperty("content")
                     .GetString();
 
+
             if (string.IsNullOrWhiteSpace(output))
                 return null;
+
 
             var result =
                 JsonSerializer.Deserialize<GroqAnalysis>(
@@ -678,10 +1010,14 @@ UNKNOWN
                     }
                 );
 
+
             if (result == null)
                 return null;
 
-            result.Model = GroqModel;
+
+            result.Model =
+                GroqModel;
+
 
             return result;
         }
@@ -691,96 +1027,74 @@ UNKNOWN
         }
     }
 
+
     /*
      * =============================================================
-     * SOURCE SELECTION
+     * RESULT
      * =============================================================
      */
 
-    private static List<object> SelectImportantEvidence(
-        List<Layer4Evidence> evidence,
-        int maxItems,
-        int maxContentLength)
-    {
-        return evidence
-            .Where(x =>
-                !string.IsNullOrWhiteSpace(x.Url))
-            .OrderByDescending(
-                x => SourcePriority(x.Url)
-            )
-            .Take(maxItems)
-            .Select(
-                x => (object)new
-                {
-                    title = x.Title,
-                    url = x.Url,
-                    content =
-                        LimitText(
-                            x.Content,
-                            maxContentLength
-                        )
-                }
-            )
-            .ToList();
-    }
-
-    private static List<object> SelectImportantSources(
+    private static Layer4VerificationResult BuildResult(
+        string? verdict,
+        double confidence,
+        double evidenceAgreement,
+        double sourceQuality,
+        string? reason,
+        List<string>? contradictoryEvidence,
         List<Layer4Source> sources,
-        int maxItems)
+        string mode,
+        string geminiModel,
+        string? groqModel)
     {
-        return sources
-            .Where(x =>
-                !string.IsNullOrWhiteSpace(x.Url))
-            .OrderByDescending(
-                x => SourcePriority(x.Url)
-            )
-            .Take(maxItems)
-            .Select(
-                x => (object)new
-                {
-                    title = x.Title,
-                    url = x.Url
-                }
-            )
-            .ToList();
+        var normalizedVerdict =
+            NormalizeVerdict(verdict);
+
+        var finalConfidence =
+            Clamp(confidence);
+
+        var finalAgreement =
+            Clamp(evidenceAgreement);
+
+        var finalSourceQuality =
+            Clamp(sourceQuality);
+
+
+        /*
+         * Backend quy?t d?nh STOP.
+         */
+
+        var stop =
+            normalizedVerdict != "UNKNOWN" &&
+            finalConfidence >= 0.90 &&
+            finalAgreement >= 0.85;
+
+
+        return new Layer4VerificationResult(
+            normalizedVerdict,
+            finalConfidence,
+            finalAgreement,
+            finalSourceQuality,
+            stop,
+            !stop,
+            mode,
+            geminiModel,
+            groqModel,
+            reason ??
+                "Layer 4 analysis completed.",
+            contradictoryEvidence ??
+                new List<string>(),
+            sources
+                .Take(20)
+                .ToList()
+        );
     }
 
-    private static int SourcePriority(
-        string url)
-    {
-        try
-        {
-            var host =
-                new Uri(url)
-                    .Host
-                    .ToLowerInvariant();
 
-            if (host.EndsWith(".gov") ||
-                host.EndsWith(".gov.vn") ||
-                host.Contains(".gov."))
-                return 100;
-
-            if (host.EndsWith(".edu") ||
-                host.EndsWith(".edu.vn"))
-                return 90;
-
-            if (host.Contains("who.int") ||
-                host.Contains("un.org") ||
-                host.Contains("nih.gov"))
-                return 95;
-
-            if (host.Contains("reuters.com") ||
-                host.Contains("apnews.com") ||
-                host.Contains("bbc.com"))
-                return 80;
-
-            return 50;
-        }
-        catch
-        {
-            return 0;
-        }
-    }
+    /*
+     * =============================================================
+     * HELPERS
+     * =============================================================
+     */
 
     private static string NormalizeMode(
         string? mode)
@@ -789,10 +1103,21 @@ UNKNOWN
             mode?.Trim().ToLowerInvariant()
             switch
             {
+                "user" => "user",
                 "expert" => "expert",
-                _ => "pro"
+                "pro" => "pro",
+
+                /*
+                 * Gi? tuong thích v?i request cu.
+                 *
+                 * N?u frontend chua g?i mode:
+                 * m?c d?nh user d? không vô tình dùng Gemini.
+                 */
+
+                _ => "user"
             };
     }
+
 
     private static string NormalizeVerdict(
         string? verdict)
@@ -810,6 +1135,7 @@ UNKNOWN
             };
     }
 
+
     private static double Clamp(
         double value)
     {
@@ -820,6 +1146,7 @@ UNKNOWN
         );
     }
 
+
     private static string? LimitText(
         string? text,
         int maxLength)
@@ -827,12 +1154,14 @@ UNKNOWN
         if (string.IsNullOrWhiteSpace(text))
             return null;
 
-        text = text.Trim();
+        text =
+            text.Trim();
 
         return text.Length <= maxLength
             ? text
             : text[..maxLength];
     }
+
 
     private static Layer4VerificationResult Unknown(
         string reason)
@@ -852,6 +1181,35 @@ UNKNOWN
             new List<Layer4Source>()
         );
     }
+
+
+    /*
+     * =============================================================
+     * INTERNAL MODELS
+     * =============================================================
+     */
+
+    private sealed class EvidenceItem
+    {
+        public string Title { get; set; } = "";
+
+        public string Url { get; set; } = "";
+
+        public string? Content { get; set; }
+
+        public string Origin { get; set; } = "";
+    }
+
+
+    private sealed class ResearchResult
+    {
+        public List<EvidenceItem> Evidence { get; } =
+            new();
+
+        public List<Layer4Source> Sources { get; } =
+            new();
+    }
+
 
     private sealed class GeminiAnalysis
     {
@@ -880,6 +1238,7 @@ UNKNOWN
         public string Model { get; set; } = "";
     }
 
+
     private sealed class GroqAnalysis
     {
         public string? Verdict { get; set; }
@@ -892,6 +1251,13 @@ UNKNOWN
 
         public string? Reason { get; set; }
 
+        public List<string>? ContradictoryEvidence
+        {
+            get;
+            set;
+        }
+
         public string Model { get; set; } = "";
     }
 }
+
