@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using StudentHub.API.DTOs.Verification;
 using StudentHub.API.Services.Verification;
@@ -59,11 +59,11 @@ public class Layer4VerificationController : ControllerBase
                 ? "pro"
                 : request.Mode.Trim().ToLowerInvariant();
 
-        if (mode != "pro" && mode != "expert")
+        if (mode != "user" && mode != "pro" && mode != "expert")
         {
             return BadRequest(new
             {
-                message = "Mode must be pro or expert."
+                message = "Mode must be user, pro or expert."
             });
         }
 
@@ -100,3 +100,4 @@ public class Layer4VerificationController : ControllerBase
         return Ok(result);
     }
 }
+
