@@ -1,6 +1,7 @@
-namespace StudentHub.API.DTOs.Verification;
+﻿namespace StudentHub.API.DTOs.Verification;
 
-public record Layer2VerifyRequest(
-    string Type,
-    string Content
-);
+public class Layer2VerifyRequest
+{
+    public string Type { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+}

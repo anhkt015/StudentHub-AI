@@ -1,6 +1,8 @@
-namespace StudentHub.API.DTOs.Verification;
+﻿namespace StudentHub.API.DTOs.Verification;
 
-public record Layer3VerifyRequest(
-    string Type,
-    string Content
-);
+public class Layer3VerifyRequest
+{
+    public string Type { get; set; } = string.Empty;
+
+    public string Content { get; set; } = string.Empty;
+}

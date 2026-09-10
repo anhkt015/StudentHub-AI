@@ -105,7 +105,7 @@ public class Layer4VerificationService : ILayer4VerificationService
                     Url = x.Url,
                     Content = LimitText(
                         x.Content,
-                        1500
+                        5000
                     ),
                     Origin = "Layer 3"
                 })
@@ -122,7 +122,7 @@ public class Layer4VerificationService : ILayer4VerificationService
                     StringComparer.OrdinalIgnoreCase
                 )
                 .Select(g => g.First())
-                .Take(8)
+                .Take(16)
                 .ToList();
 
 
@@ -313,7 +313,7 @@ public class Layer4VerificationService : ILayer4VerificationService
                 api_key = apiKey,
                 query = query,
                 search_depth = "advanced",
-                max_results = 5,
+                max_results = 8,
                 include_answer = true,
                 include_raw_content = false,
                 include_images = false
@@ -410,7 +410,7 @@ public class Layer4VerificationService : ILayer4VerificationService
                             Url = url,
                             Content = LimitText(
                                 text,
-                                1500
+                                5000
                             ),
                             Origin =
                                 "Layer 4 Research"
@@ -1267,6 +1267,5 @@ Return ONLY JSON.
         public string Model { get; set; } = "";
     }
 }
-
 
 

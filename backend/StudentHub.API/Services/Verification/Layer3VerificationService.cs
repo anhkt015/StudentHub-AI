@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 
 namespace StudentHub.API.Services.Verification;
@@ -49,12 +49,22 @@ public class Layer3VerificationService : ILayer3VerificationService
         try
         {
             var client = _httpClientFactory.CreateClient();
-
             client.Timeout = TimeSpan.FromSeconds(30);
 
-            var query = type == "url"
-                ? $"{content} fact check"
-                : $"{content} fact check";
+            /*
+             * Layer 3 = Web Evidence Retrieval
+             *
+             * URL:
+             * Search the submitted URL/domain together with fact-check terms.
+             *
+             * TEXT:
+             * Search the exact claim together with fact-check/evidence terms.
+             *
+             * Layer 3 does NOT make the final truth decision.
+             * Layer 4 will analyze the collected evidence.
+             */
+
+            var query = BuildQuery(type, content);
 
             var requestBody = new
             {
@@ -80,8 +90,7 @@ public class Layer3VerificationService : ILayer3VerificationService
                 "application/json"
             );
 
-            using var response =
-                await client.SendAsync(request);
+            using var response = await client.SendAsync(request);
 
             var responseBody =
                 await response.Content.ReadAsStringAsync();
@@ -103,31 +112,24 @@ public class Layer3VerificationService : ILayer3VerificationService
                     "answer",
                     out var answerElement))
             {
-                answer =
-                    answerElement.GetString() ?? "";
+                answer = answerElement.GetString() ?? "";
             }
 
-            var evidence =
-                new List<Layer3Evidence>();
-
-            var sources =
-                new List<Layer3Source>();
+            var evidence = new List<Layer3Evidence>();
+            var sources = new List<Layer3Source>();
 
             if (root.TryGetProperty(
                     "results",
                     out var resultsElement) &&
-                resultsElement.ValueKind ==
-                    JsonValueKind.Array)
+                resultsElement.ValueKind == JsonValueKind.Array)
             {
-                foreach (var result in
-                         resultsElement.EnumerateArray())
+                foreach (var result in resultsElement.EnumerateArray())
                 {
                     var title =
                         result.TryGetProperty(
                             "title",
                             out var titleElement)
-                            ? titleElement.GetString() ??
-                              "Untitled"
+                            ? titleElement.GetString() ?? "Untitled"
                             : "Untitled";
 
                     var url =
@@ -144,23 +146,25 @@ public class Layer3VerificationService : ILayer3VerificationService
                             ? contentElement.GetString()
                             : null;
 
-                    if (!string.IsNullOrWhiteSpace(url))
+                    if (string.IsNullOrWhiteSpace(url))
                     {
-                        sources.Add(
-                            new Layer3Source(
-                                title,
-                                url
-                            )
-                        );
-
-                        evidence.Add(
-                            new Layer3Evidence(
-                                title,
-                                url,
-                                text
-                            )
-                        );
+                        continue;
                     }
+
+                    sources.Add(
+                        new Layer3Source(
+                            title,
+                            url
+                        )
+                    );
+
+                    evidence.Add(
+                        new Layer3Evidence(
+                            title,
+                            url,
+                            text
+                        )
+                    );
                 }
             }
 
@@ -177,96 +181,32 @@ public class Layer3VerificationService : ILayer3VerificationService
                 );
             }
 
-            var combinedText =
-                $"{answer} {string.Join(
-                    " ",
-                    evidence.Select(x => x.Content ?? "")
-                )}"
-                .ToLowerInvariant();
-
-            var falseSignals = new[]
-            {
-                "false",
-                "fake",
-                "hoax",
-                "misleading",
-                "debunked",
-                "not true",
-                "untrue",
-                "fabricated",
-                "incorrect",
-                "false claim",
-                "claim is false",
-                "information is false"
-            };
-
-            var trueSignals = new[]
-            {
-                "true",
-                "accurate",
-                "verified",
-                "confirmed",
-                "correct",
-                "supported by evidence"
-            };
-
-            var falseCount =
-                falseSignals.Count(
-                    x => combinedText.Contains(x)
-                );
-
-            var trueCount =
-                trueSignals.Count(
-                    x => combinedText.Contains(x)
-                );
-
             /*
-             * Layer 3 is deliberately conservative.
+             * IMPORTANT:
              *
-             * We only stop automatically when the web evidence
-             * strongly indicates that the claim is false.
+             * Do not count words such as "false" or "true"
+             * inside arbitrary web pages to determine truth.
              *
-             * Otherwise Layer 4 receives the evidence and
-             * performs the final AI analysis.
+             * A web page can contain:
+             * "This claim is NOT false..."
+             * "Some people falsely believe..."
+             *
+             * Simple keyword counting can therefore produce
+             * incorrect FAKE/TRUE decisions.
+             *
+             * Layer 3 only reports that evidence was found.
+             * Layer 4 performs the final AI reasoning.
              */
 
-            if (falseCount >= 3 &&
-                falseCount > trueCount)
-            {
-                return new Layer3VerificationResult(
-                    "FAKE",
-                    0.90,
-                    true,
-                    false,
-                    "Multiple web-search signals indicate that the information is false or has been debunked.",
-                    evidence,
-                    sources
-                );
-            }
-
-            if (falseCount >= 2 &&
-                falseCount > trueCount &&
-                sources.Count >= 3)
-            {
-                return new Layer3VerificationResult(
-                    "FAKE",
-                    0.85,
-                    true,
-                    false,
-                    "Multiple web sources contain strong indicators that the information is false.",
-                    evidence,
-                    sources
-                );
-            }
+            var reason =
+                BuildReason(type, content, answer, sources.Count);
 
             return new Layer3VerificationResult(
                 "UNKNOWN",
                 0.50,
                 false,
                 true,
-                string.IsNullOrWhiteSpace(answer)
-                    ? "Web evidence was collected, but Layer 3 cannot confidently determine whether the information is true or false."
-                    : $"Tavily web search returned evidence. Layer 3 will defer the final judgment to Layer 4. Web summary: {answer}",
+                reason,
                 evidence,
                 sources
             );
@@ -283,6 +223,45 @@ public class Layer3VerificationService : ILayer3VerificationService
                 $"Layer 3 verification failed: {ex.Message}"
             );
         }
+    }
+
+    private static string BuildQuery(
+        string type,
+        string content)
+    {
+        if (type == "url")
+        {
+            return
+                $"\"{content}\" fact check scam malware security credibility";
+        }
+
+        return
+            $"\"{content}\" fact check evidence verified false true debunked";
+    }
+
+    private static string BuildReason(
+        string type,
+        string content,
+        string answer,
+        int sourceCount)
+    {
+        var target =
+            type == "url"
+                ? "submitted URL"
+                : "submitted claim";
+
+        if (!string.IsNullOrWhiteSpace(answer))
+        {
+            return
+                $"Tavily collected {sourceCount} web source(s) for the {target}. " +
+                $"Layer 3 will defer the final judgment to Layer 4. " +
+                $"Web summary: {answer}";
+        }
+
+        return
+            $"Tavily collected {sourceCount} web source(s) for the {target}. " +
+            "Layer 3 cannot confidently determine whether the information is true or false. " +
+            "The collected evidence will be passed to Layer 4 for final analysis.";
     }
 
     private static Layer3VerificationResult Unknown(

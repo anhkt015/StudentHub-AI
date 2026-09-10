@@ -1,3 +1,4 @@
+﻿using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace StudentHub.API.Services.Verification;
@@ -21,43 +22,37 @@ public class Layer2VerificationService : ILayer2VerificationService
     {
         if (string.IsNullOrWhiteSpace(type))
         {
-            return new Layer2VerificationResult(
-                "UNKNOWN",
-                0,
-                "Verification type is required.",
-                new List<Layer2ProviderResult>()
-            );
+            return Unknown(
+                "Layer 2 verification type is required.",
+                "Layer 2");
         }
 
         if (string.IsNullOrWhiteSpace(content))
         {
-            return new Layer2VerificationResult(
-                "UNKNOWN",
-                0,
-                "Content is required.",
-                new List<Layer2ProviderResult>()
-            );
+            return Unknown(
+                "Layer 2 verification content is required.",
+                "Layer 2");
         }
 
         type = type.Trim().ToLowerInvariant();
 
-        // Layer 2 hiện tại:
-        // - URL  -> Google Safe Browsing
-        // - IMAGE -> chưa tích hợp provider
-        // - TEXT -> chưa tích hợp provider
-
-        if (type != "url")
+        return type switch
         {
-            return new Layer2VerificationResult(
-                "UNKNOWN",
-                0,
-                $"No Layer 2 provider is configured for type '{type}'.",
-                new List<Layer2ProviderResult>()
-            );
-        }
-
-        return await VerifyUrlWithGoogleSafeBrowsingAsync(content.Trim());
+            "url" => await VerifyUrlWithGoogleSafeBrowsingAsync(content),
+            "text" => await VerifyTextWithGoogleFactCheckAsync(content),
+            "image" => Unknown(
+                "Image verification is not implemented yet.",
+                "Layer 2 Image"),
+            _ => Unknown(
+                $"Unsupported Layer 2 verification type: {type}",
+                "Layer 2")
+        };
     }
+
+    // ============================================================
+    // LAYER 2 - URL
+    // Google Safe Browsing
+    // ============================================================
 
     private async Task<Layer2VerificationResult>
         VerifyUrlWithGoogleSafeBrowsingAsync(string url)
@@ -66,42 +61,9 @@ public class Layer2VerificationService : ILayer2VerificationService
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            return new Layer2VerificationResult(
-                "UNKNOWN",
-                0,
+            return Unknown(
                 "Google Safe Browsing API key is not configured.",
-                new List<Layer2ProviderResult>
-                {
-                    new Layer2ProviderResult(
-                        "Google Safe Browsing",
-                        false,
-                        "UNKNOWN",
-                        0,
-                        "API key is missing."
-                    )
-                }
-            );
-        }
-
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-            (uri.Scheme != Uri.UriSchemeHttp &&
-             uri.Scheme != Uri.UriSchemeHttps))
-        {
-            return new Layer2VerificationResult(
-                "UNKNOWN",
-                0,
-                "Invalid URL.",
-                new List<Layer2ProviderResult>
-                {
-                    new Layer2ProviderResult(
-                        "Google Safe Browsing",
-                        false,
-                        "UNKNOWN",
-                        0,
-                        "URL must start with http:// or https://."
-                    )
-                }
-            );
+                "Google Safe Browsing");
         }
 
         try
@@ -109,16 +71,16 @@ public class Layer2VerificationService : ILayer2VerificationService
             var client = _httpClientFactory.CreateClient();
 
             var endpoint =
-                $"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={Uri.EscapeDataString(apiKey)}";
+                "https://safebrowsing.googleapis.com/v4/threatMatches:find" +
+                $"?key={Uri.EscapeDataString(apiKey)}";
 
             var requestBody = new
             {
                 client = new
                 {
                     clientId = "StudentHub-AI",
-                    clientVersion = "1.0.0"
+                    clientVersion = "1.0"
                 },
-
                 threatInfo = new
                 {
                     threatTypes = new[]
@@ -128,108 +90,82 @@ public class Layer2VerificationService : ILayer2VerificationService
                         "UNWANTED_SOFTWARE",
                         "POTENTIALLY_HARMFUL_APPLICATION"
                     },
-
                     platformTypes = new[]
                     {
                         "ANY_PLATFORM"
                     },
-
                     threatEntryTypes = new[]
                     {
                         "URL"
                     },
-
                     threatEntries = new[]
                     {
                         new
                         {
-                            url = uri.ToString()
+                            url
                         }
                     }
                 }
             };
 
-            var json = JsonSerializer.Serialize(requestBody);
-
-            using var content = new StringContent(
-                json,
-                System.Text.Encoding.UTF8,
-                "application/json"
-            );
-
-            using var response = await client.PostAsync(
+            var response = await client.PostAsJsonAsync(
                 endpoint,
-                content
-            );
+                requestBody);
 
-            var responseBody = await response.Content.ReadAsStringAsync();
+            var rawJson = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
             {
                 return new Layer2VerificationResult(
                     "UNKNOWN",
-                    0,
+                    0.0,
                     "Google Safe Browsing request failed.",
                     new List<Layer2ProviderResult>
                     {
-                        new Layer2ProviderResult(
+                        new(
                             "Google Safe Browsing",
                             false,
                             "UNKNOWN",
-                            0,
-                            $"HTTP {(int)response.StatusCode}: {responseBody}"
-                        )
-                    }
-                );
+                            0.0,
+                            rawJson)
+                    });
             }
 
-            // Google Safe Browsing normally returns:
-            // {} when no threat is found.
-            //
-            // If a threat is found:
-            // {
-            //   "matches": [...]
-            // }
-
-            using var document =
-                JsonDocument.Parse(responseBody);
+            using var document = JsonDocument.Parse(rawJson);
 
             var root = document.RootElement;
 
-            var hasMatches =
-                root.TryGetProperty("matches", out var matches) &&
+            if (root.TryGetProperty(
+                    "matches",
+                    out var matches) &&
                 matches.ValueKind == JsonValueKind.Array &&
-                matches.GetArrayLength() > 0;
-
-            if (hasMatches)
+                matches.GetArrayLength() > 0)
             {
                 var firstMatch = matches[0];
 
-                var threatType = "UNKNOWN";
+                string? threatType = null;
 
                 if (firstMatch.TryGetProperty(
                         "threatType",
                         out var threatTypeElement))
                 {
                     threatType =
-                        threatTypeElement.GetString() ?? "UNKNOWN";
+                        threatTypeElement.GetString();
                 }
 
                 return new Layer2VerificationResult(
                     "DANGEROUS",
                     0.99,
-                    $"Google Safe Browsing detected a threat: {threatType}.",
+                    "Google Safe Browsing reported this URL as a known threat.",
                     new List<Layer2ProviderResult>
                     {
-                        new Layer2ProviderResult(
+                        new(
                             "Google Safe Browsing",
                             true,
                             "DANGEROUS",
                             0.99,
-                            $"Threat detected: {threatType}."
-                        )
-                    }
-                );
+                            $"Threat type: {threatType ?? "Unknown"}")
+                    });
             }
 
             return new Layer2VerificationResult(
@@ -238,33 +174,340 @@ public class Layer2VerificationService : ILayer2VerificationService
                 "Google Safe Browsing did not report this URL as a known threat.",
                 new List<Layer2ProviderResult>
                 {
-                    new Layer2ProviderResult(
+                    new(
                         "Google Safe Browsing",
                         true,
                         "SAFE",
                         0.95,
-                        "No known Safe Browsing threat was returned."
-                    )
-                }
-            );
+                        "No known Safe Browsing threat was returned.")
+                });
         }
         catch (Exception ex)
         {
             return new Layer2VerificationResult(
                 "UNKNOWN",
-                0,
+                0.0,
                 "Google Safe Browsing verification failed.",
                 new List<Layer2ProviderResult>
                 {
-                    new Layer2ProviderResult(
+                    new(
                         "Google Safe Browsing",
                         false,
                         "UNKNOWN",
-                        0,
-                        ex.Message
-                    )
-                }
-            );
+                        0.0,
+                        ex.Message)
+                });
         }
+    }
+
+    // ============================================================
+    // LAYER 2 - TEXT
+    // Google Fact Check Tools API
+    //
+    // Layer 2 KHÔNG tự kết luận TRUE/FALSE.
+    // Chỉ lấy evidence từ Google Fact Check.
+    //
+    // Thay đổi:
+    // - Lấy tối đa 3 review usable.
+    // - Giữ nguyên thứ tự Google trả về.
+    // - Không tự tạo similarity score.
+    // ============================================================
+
+    private async Task<Layer2VerificationResult>
+        VerifyTextWithGoogleFactCheckAsync(string text)
+    {
+        var apiKey =
+            _configuration["GoogleFactCheck:ApiKey"];
+
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            return Unknown(
+                "Google Fact Check API key is not configured.",
+                "Google Fact Check");
+        }
+
+        try
+        {
+            var client =
+                _httpClientFactory.CreateClient();
+
+            var endpoint =
+                "https://factchecktools.googleapis.com/v1alpha1/claims:search" +
+                $"?query={Uri.EscapeDataString(text)}" +
+                "&pageSize=10" +
+                $"&key={Uri.EscapeDataString(apiKey)}";
+
+            var response =
+                await client.GetAsync(endpoint);
+
+            var rawJson =
+                await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new Layer2VerificationResult(
+                    "UNKNOWN",
+                    0.0,
+                    "Google Fact Check request failed.",
+                    new List<Layer2ProviderResult>
+                    {
+                        new(
+                            "Google Fact Check",
+                            false,
+                            "UNKNOWN",
+                            0.0,
+                            rawJson)
+                    });
+            }
+
+            using var document =
+                JsonDocument.Parse(rawJson);
+
+            var root =
+                document.RootElement;
+
+            if (!root.TryGetProperty(
+                    "claims",
+                    out var claims) ||
+                claims.ValueKind != JsonValueKind.Array ||
+                claims.GetArrayLength() == 0)
+            {
+                return new Layer2VerificationResult(
+                    "UNKNOWN",
+                    0.0,
+                    "Google Fact Check did not find a matching claim review.",
+                    new List<Layer2ProviderResult>
+                    {
+                        new(
+                            "Google Fact Check",
+                            true,
+                            "UNKNOWN",
+                            0.0,
+                            "No claim review was returned.")
+                    });
+            }
+
+            // Google đã xếp hạng kết quả.
+            // Không tự tạo similarity score.
+            var evidence = new List<string>();
+
+            foreach (var claim in claims.EnumerateArray())
+            {
+                if (!claim.TryGetProperty(
+                        "claimReview",
+                        out var reviews) ||
+                    reviews.ValueKind != JsonValueKind.Array ||
+                    reviews.GetArrayLength() == 0)
+                {
+                    continue;
+                }
+
+                foreach (var review in reviews.EnumerateArray())
+                {
+                    var rating =
+                        GetStringProperty(
+                            review,
+                            "textualRating");
+
+                    var title =
+                        GetStringProperty(
+                            review,
+                            "title");
+
+                    var reviewUrl =
+                        GetStringProperty(
+                            review,
+                            "url");
+
+                    var reviewDate =
+                        GetStringProperty(
+                            review,
+                            "reviewDate");
+
+                    string? publisherName = null;
+
+                    if (review.TryGetProperty(
+                            "publisher",
+                            out var publisher) &&
+                        publisher.ValueKind ==
+                            JsonValueKind.Object)
+                    {
+                        publisherName =
+                            GetStringProperty(
+                                publisher,
+                                "name");
+                    }
+
+                    var claimText =
+                        GetStringProperty(
+                            claim,
+                            "text");
+
+                    var message =
+                        BuildFactCheckMessage(
+                            claimText,
+                            rating,
+                            title,
+                            publisherName,
+                            reviewDate,
+                            reviewUrl);
+
+                    if (!string.IsNullOrWhiteSpace(message))
+                    {
+                        evidence.Add(message);
+                    }
+
+                    // Tối đa 3 evidence.
+                    if (evidence.Count >= 3)
+                    {
+                        break;
+                    }
+                }
+
+                if (evidence.Count >= 3)
+                {
+                    break;
+                }
+            }
+
+            if (evidence.Count == 0)
+            {
+                return new Layer2VerificationResult(
+                    "UNKNOWN",
+                    0.0,
+                    "Google Fact Check returned claims, but no usable claimReview was found.",
+                    new List<Layer2ProviderResult>
+                    {
+                        new(
+                            "Google Fact Check",
+                            true,
+                            "UNKNOWN",
+                            0.0,
+                            "Claims were returned but no usable claimReview was found.")
+                    });
+            }
+
+            var combinedMessage =
+                string.Join(
+                    Environment.NewLine +
+                    Environment.NewLine,
+                    evidence.Select(
+                        (item, index) =>
+                            $"Evidence #{index + 1}:{Environment.NewLine}{item}"));
+
+            return new Layer2VerificationResult(
+                "UNKNOWN",
+                0.5,
+                $"Google Fact Check found {evidence.Count} fact-check review(s). Layer 2 returns evidence only; final truth assessment is deferred to later layers.",
+                new List<Layer2ProviderResult>
+                {
+                    new(
+                        "Google Fact Check",
+                        true,
+                        "UNKNOWN",
+                        0.5,
+                        combinedMessage)
+                });
+        }
+        catch (Exception ex)
+        {
+            return new Layer2VerificationResult(
+                "UNKNOWN",
+                0.0,
+                "Google Fact Check verification failed.",
+                new List<Layer2ProviderResult>
+                {
+                    new(
+                        "Google Fact Check",
+                        false,
+                        "UNKNOWN",
+                        0.0,
+                        ex.Message)
+                });
+        }
+    }
+
+    // ============================================================
+    // Helpers
+    // ============================================================
+
+    private static string? GetStringProperty(
+        JsonElement element,
+        string propertyName)
+    {
+        if (!element.TryGetProperty(
+                propertyName,
+                out var property))
+        {
+            return null;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.String =>
+                property.GetString(),
+
+            JsonValueKind.Number =>
+                property.ToString(),
+
+            JsonValueKind.True =>
+                "true",
+
+            JsonValueKind.False =>
+                "false",
+
+            _ => property.ToString()
+        };
+    }
+
+    private static string BuildFactCheckMessage(
+        string? claim,
+        string? rating,
+        string? title,
+        string? publisher,
+        string? reviewDate,
+        string? url)
+    {
+        var parts =
+            new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(claim))
+            parts.Add($"Claim: {claim}");
+
+        if (!string.IsNullOrWhiteSpace(rating))
+            parts.Add($"Rating: {rating}");
+
+        if (!string.IsNullOrWhiteSpace(title))
+            parts.Add($"Review: {title}");
+
+        if (!string.IsNullOrWhiteSpace(publisher))
+            parts.Add($"Publisher: {publisher}");
+
+        if (!string.IsNullOrWhiteSpace(reviewDate))
+            parts.Add($"Review date: {reviewDate}");
+
+        if (!string.IsNullOrWhiteSpace(url))
+            parts.Add($"Source: {url}");
+
+        return string.Join(" | ", parts);
+    }
+
+    private static Layer2VerificationResult Unknown(
+        string reason,
+        string provider)
+    {
+        return new Layer2VerificationResult(
+            "UNKNOWN",
+            0.0,
+            reason,
+            new List<Layer2ProviderResult>
+            {
+                new(
+                    provider,
+                    false,
+                    "UNKNOWN",
+                    0.0,
+                    reason)
+            });
     }
 }

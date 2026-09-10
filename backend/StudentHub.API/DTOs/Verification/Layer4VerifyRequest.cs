@@ -1,27 +1,31 @@
 ﻿namespace StudentHub.API.DTOs.Verification;
 
-public record Layer4VerifyRequest(
-    string Type,
-    string Content,
-    string Mode,
-    Layer3VerificationInput Layer3
-);
+public class Layer4VerifyRequest
+{
+    public string Type { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+    public string Mode { get; set; } = string.Empty;
+    public Layer3VerificationInput Layer3 { get; set; } = new();
+}
 
-public record Layer3VerificationInput(
-    string Verdict,
-    double Confidence,
-    string Reason,
-    List<Layer3EvidenceInput> Evidence,
-    List<Layer3SourceInput> Sources
-);
+public class Layer3VerificationInput
+{
+    public string Verdict { get; set; } = string.Empty;
+    public double Confidence { get; set; }
+    public string Reason { get; set; } = string.Empty;
+    public List<Layer3EvidenceInput> Evidence { get; set; } = new();
+    public List<Layer3SourceInput> Sources { get; set; } = new();
+}
 
-public record Layer3EvidenceInput(
-    string Title,
-    string Url,
-    string? Content
-);
+public class Layer3EvidenceInput
+{
+    public string Title { get; set; } = string.Empty;
+    public string Url { get; set; } = string.Empty;
+    public string? Content { get; set; }
+}
 
-public record Layer3SourceInput(
-    string Title,
-    string Url
-);
+public class Layer3SourceInput
+{
+    public string Title { get; set; } = string.Empty;
+    public string Url { get; set; } = string.Empty;
+}
