@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using StudentHub.API.Data;
@@ -41,6 +41,7 @@ builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        options.MapInboundClaims = false;
         options.Authority = supabaseJwtIssuer;
 
         options.TokenValidationParameters = new TokenValidationParameters
@@ -115,3 +116,6 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+
+

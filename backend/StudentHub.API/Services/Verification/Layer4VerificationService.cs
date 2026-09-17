@@ -13,7 +13,12 @@ public class Layer4VerificationService : ILayer4VerificationService
     private const string Gemini37 = "gemini-3.7-flash";
     private const string Gemini36 = "gemini-3.6-flash";
 
+    // Groq dùng cho TEXT / URL
     private const string GroqModel = "openai/gpt-oss-120b";
+
+    // Groq Vision dùng cho IMAGE
+    // qwen/qwen3.6-27b có thể không được account hiện tại cấp quyền.
+    private const string GroqVisionModel = "qwen/qwen3.8-27b";
 
     public Layer4VerificationService(
         IHttpClientFactory httpClientFactory,
@@ -22,6 +27,13 @@ public class Layer4VerificationService : ILayer4VerificationService
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
     }
+
+
+    /*
+     * =============================================================
+     * TEXT / URL
+     * =============================================================
+     */
 
     public async Task<Layer4VerificationResult> VerifyAsync(
         string type,
@@ -62,14 +74,6 @@ public class Layer4VerificationService : ILayer4VerificationService
          * =========================================================
          * LAYER 4 RESEARCH
          * =========================================================
-         *
-         * Layer 3 dã search m?t l?n.
-         *
-         * Layer 4 KHÔNG ch? tin Layer 3.
-         *
-         * Nó th?c hi?n m?t research riêng b?ng Tavily.
-         *
-         * Ðây là research d?c l?p tru?c khi AI suy lu?n.
          */
 
         var research =
@@ -84,15 +88,6 @@ public class Layer4VerificationService : ILayer4VerificationService
          * =========================================================
          * COMBINE EVIDENCE
          * =========================================================
-         *
-         * AI nh?n:
-         *
-         * 1. Layer 3 evidence
-         * 2. Layer 3 sources
-         * 3. Layer 4 research evidence
-         * 4. Layer 4 research sources
-         *
-         * AI không t? b?a ngu?n.
          */
 
         var layer3Evidence =
@@ -165,7 +160,7 @@ public class Layer4VerificationService : ILayer4VerificationService
          * EXPERT / PRO
          *   -> Gemini ONLY
          *
-         * KHÔNG g?i hai model trong cùng m?t request.
+         * KHÔNG gọi hai model trong cùng một request.
          */
 
         if (mode == "user")
@@ -214,11 +209,9 @@ public class Layer4VerificationService : ILayer4VerificationService
          * EXPERT / PRO
          * =========================================================
          *
-         * Ch? Gemini.
+         * Chỉ Gemini.
          *
          * 3.7 -> fallback 3.6
-         *
-         * Không g?i Groq.
          */
 
         if (string.IsNullOrWhiteSpace(geminiKey))
@@ -265,16 +258,6 @@ public class Layer4VerificationService : ILayer4VerificationService
      * =============================================================
      * LAYER 4 RESEARCH
      * =============================================================
-     *
-     * Ðây là research m?i c?a Layer 4.
-     *
-     * Layer 3 search #1
-     * Layer 4 search #2
-     *
-     * Không ph?i AI search.
-     * Tavily th?c hi?n web research.
-     *
-     * Sau dó M?T AI s? suy lu?n t? toàn b? evidence.
      */
 
     private async Task<ResearchResult> ResearchAsync(
@@ -296,11 +279,6 @@ public class Layer4VerificationService : ILayer4VerificationService
             client.Timeout =
                 TimeSpan.FromSeconds(30);
 
-
-            /*
-             * Query khác Layer 3 m?t chút d? tang
-             * kh? nang tìm evidence d?c l?p.
-             */
 
             var query =
                 type == "url"
@@ -433,9 +411,9 @@ public class Layer4VerificationService : ILayer4VerificationService
         catch
         {
             /*
-             * Research failure KHÔNG làm Layer 4 ch?t.
+             * Research failure không làm Layer 4 chết.
              *
-             * AI v?n có th? suy lu?n t? Layer 3.
+             * AI vẫn có thể suy luận từ Layer 3.
              */
 
             return result;
@@ -445,7 +423,7 @@ public class Layer4VerificationService : ILayer4VerificationService
 
     /*
      * =============================================================
-     * GEMINI
+     * GEMINI TEXT / URL
      * =============================================================
      */
 
@@ -772,16 +750,8 @@ The sources field must ONLY contain URLs supplied in the input.
 
     /*
      * =============================================================
-     * GROQ
+     * GROQ TEXT / URL
      * =============================================================
-     *
-     * USER MODE:
-     *
-     * Tavily research
-     *      ?
-     * Groq
-     *
-     * Không Gemini.
      */
 
     private async Task<GroqAnalysis?>
@@ -1037,6 +1007,970 @@ Return ONLY JSON.
 
     /*
      * =============================================================
+     * IMAGE VERIFICATION
+     * =============================================================
+     *
+     * USER
+     *   -> Groq Vision ONLY
+     *
+     * EXPERT / PRO
+     *   -> Gemini Vision ONLY
+     *
+     * Layer 2:
+     *   Sightengine
+     *
+     * Layer 3:
+     *   External contextual evidence
+     *
+     * Layer 4:
+     *   AI final reasoning
+     */
+
+    public async Task<Layer4VerificationResult> VerifyImageAsync(
+        IFormFile image,
+        string mode,
+        Layer2VerificationResult layer2,
+        Layer4Layer3Input layer3)
+    {
+        if (image == null || image.Length == 0)
+        {
+            return Unknown("Image is required.");
+        }
+
+        if (layer2 == null)
+        {
+            return Unknown("Layer 2 image result is required.");
+        }
+
+        if (layer3 == null)
+        {
+            return Unknown("Layer 3 result is required.");
+        }
+
+        if (image.Length > 10 * 1024 * 1024)
+        {
+            return Unknown("Image exceeds the 10 MB limit.");
+        }
+
+        mode = NormalizeMode(mode);
+
+        try
+        {
+            /*
+             * =====================================================
+             * READ IMAGE
+             * =====================================================
+             */
+
+            using var memoryStream =
+                new MemoryStream();
+
+            await image.CopyToAsync(memoryStream);
+
+            var imageBytes =
+                memoryStream.ToArray();
+
+            var imageBase64 =
+                Convert.ToBase64String(
+                    imageBytes
+                );
+
+            var mimeType =
+                string.IsNullOrWhiteSpace(image.ContentType)
+                    ? "image/jpeg"
+                    : image.ContentType;
+
+
+            /*
+             * =====================================================
+             * COMPACT LAYER 3 EVIDENCE
+             * =====================================================
+             */
+
+            var evidence =
+                layer3.Evidence
+                    .Where(x =>
+                        !string.IsNullOrWhiteSpace(x.Url))
+                    .Select(x =>
+                        new EvidenceItem
+                        {
+                            Title = x.Title,
+                            Url = x.Url,
+                            Content = LimitText(
+                                x.Content,
+                                1200
+                            ),
+                            Origin = "Layer 3"
+                        })
+                    .GroupBy(
+                        x => x.Url,
+                        StringComparer.OrdinalIgnoreCase
+                    )
+                    .Select(g => g.First())
+                    .Take(6)
+                    .ToList();
+
+
+            var sources =
+                layer3.Sources
+                    .Where(x =>
+                        !string.IsNullOrWhiteSpace(x.Url))
+                    .GroupBy(
+                        x => x.Url,
+                        StringComparer.OrdinalIgnoreCase
+                    )
+                    .Select(g => g.First())
+                    .Take(10)
+                    .ToList();
+
+
+            /*
+             * =====================================================
+             * USER -> GROQ VISION
+             * =====================================================
+             */
+
+            if (mode == "user")
+            {
+                var groqKey =
+                    _configuration["GROQ_API_KEY"];
+
+                if (string.IsNullOrWhiteSpace(groqKey))
+                {
+                    return Unknown(
+                        "GROQ_API_KEY is not configured."
+                    );
+                }
+
+
+                var result =
+                    await TryGroqImageAsync(
+                        groqKey,
+                        mode,
+                        mimeType,
+                        imageBase64,
+                        layer2,
+                        layer3,
+                        evidence,
+                        sources
+                    );
+
+
+                if (result == null)
+                {
+                    return Unknown(
+                        "Groq Vision was unavailable for image verification."
+                    );
+                }
+
+
+                /*
+                 * GroqAnalysis không có Sources.
+                 *
+                 * Sources lấy từ Layer 3.
+                 */
+
+                return BuildResult(
+                    result.Verdict,
+                    result.Confidence,
+                    result.EvidenceAgreement,
+                    result.SourceQuality,
+                    result.Reason,
+                    result.ContradictoryEvidence,
+                    sources,
+                    mode,
+                    "none",
+                    result.Model
+                );
+            }
+
+
+            /*
+             * =====================================================
+             * EXPERT / PRO -> GEMINI VISION
+             * =====================================================
+             */
+
+            var geminiKey =
+                _configuration["GEMINI_API_KEY"];
+
+            if (string.IsNullOrWhiteSpace(geminiKey))
+            {
+                return Unknown(
+                    "GEMINI_API_KEY is not configured."
+                );
+            }
+
+
+            /*
+             * Gemini 3.7
+             */
+
+            var resultGemini =
+                await TryGeminiImageAsync(
+                    geminiKey,
+                    Gemini37,
+                    mode,
+                    mimeType,
+                    imageBase64,
+                    layer2,
+                    layer3,
+                    evidence,
+                    sources
+                );
+
+
+            /*
+             * Gemini 3.6 fallback
+             */
+
+            if (resultGemini == null)
+            {
+                resultGemini =
+                    await TryGeminiImageAsync(
+                        geminiKey,
+                        Gemini36,
+                        mode,
+                        mimeType,
+                        imageBase64,
+                        layer2,
+                        layer3,
+                        evidence,
+                        sources
+                    );
+            }
+
+
+            if (resultGemini == null)
+            {
+                return Unknown(
+                    "Gemini Vision was unavailable for image verification."
+                );
+            }
+
+
+            return BuildResult(
+                resultGemini.Verdict,
+                resultGemini.Confidence,
+                resultGemini.EvidenceAgreement,
+                resultGemini.SourceQuality,
+                resultGemini.Reason,
+                resultGemini.ContradictoryEvidence,
+                sources,
+                mode,
+                resultGemini.Model,
+                null
+            );
+        }
+        catch (Exception ex)
+        {
+            return Unknown(
+                $"Layer 4 image verification failed: {ex.Message}"
+            );
+        }
+    }
+
+
+    /*
+     * =============================================================
+     * GROQ IMAGE
+     * =============================================================
+     *
+     * USER MODE ONLY.
+     *
+     * Groq OpenAI-compatible multimodal API.
+     *
+     * Model:
+     *   qwen/qwen3.8-27b
+     *
+     * Input:
+     *   - Layer 2 Sightengine
+     *   - Layer 3 evidence
+     *   - Actual image
+     *
+     * Output:
+     *   - TRUE
+     *   - FAKE
+     *   - MISLEADING
+     *   - UNKNOWN
+     */
+
+    private async Task<GroqAnalysis?>
+        TryGroqImageAsync(
+            string apiKey,
+            string mode,
+            string mimeType,
+            string imageBase64,
+            Layer2VerificationResult layer2,
+            Layer4Layer3Input layer3,
+            List<EvidenceItem> evidence,
+            List<Layer4Source> sources)
+    {
+        try
+        {
+            var client =
+                _httpClientFactory.CreateClient();
+
+            client.Timeout =
+                TimeSpan.FromSeconds(90);
+
+
+            var systemPrompt = """
+You are Layer 4 of StudentHub AI Trust.
+
+You are the FINAL verification model for an IMAGE.
+
+You can directly inspect the supplied image.
+
+Determine whether the image should be classified as:
+
+TRUE
+FAKE
+MISLEADING
+UNKNOWN
+
+You must analyze:
+
+1. The actual image.
+2. Layer 2 provider results.
+3. Layer 3 external evidence.
+4. Visual inconsistencies.
+5. Possible AI generation.
+6. Possible deepfake or face manipulation.
+7. Possible image editing or compositing.
+8. Context supplied by external evidence.
+
+Layer 2 is evidence, NOT absolute truth.
+
+Layer 3 is evidence, NOT absolute truth.
+
+Do NOT blindly follow Layer 2.
+
+Do NOT blindly follow Layer 3.
+
+You MUST independently inspect the image.
+
+Look for:
+
+- AI-generated artifacts
+- unnatural faces
+- duplicated objects
+- distorted anatomy
+- strange hands
+- inconsistent lighting
+- inconsistent shadows
+- impossible reflections
+- impossible geometry
+- text rendering errors
+- unnatural skin or hair
+- blending artifacts
+- face replacement artifacts
+- compositing artifacts
+- inconsistent perspective
+- inconsistent image quality
+- suspicious editing
+
+IMPORTANT:
+
+A real image can still be MISLEADING if it is used
+with the wrong context.
+
+A real image does NOT automatically mean the claim is TRUE.
+
+A manipulated image does NOT automatically mean
+the surrounding claim is completely FALSE.
+
+Use the supplied evidence to evaluate context.
+
+Do NOT invent facts.
+
+Do NOT invent sources.
+
+Do NOT invent URLs.
+
+Do NOT claim that you personally browsed the internet.
+
+Use ONLY:
+
+- the supplied image
+- Layer 2 result
+- Layer 3 evidence
+- supplied sources
+
+Verdicts:
+
+TRUE
+FAKE
+MISLEADING
+UNKNOWN
+
+TRUE:
+The image appears authentic and the supplied context/evidence
+supports the interpretation.
+
+FAKE:
+Strong visual evidence indicates AI generation,
+deepfake, or material manipulation.
+
+MISLEADING:
+The image may be real or partly real, but the supplied
+context or interpretation is misleading.
+
+UNKNOWN:
+Evidence is insufficient or genuinely contradictory.
+
+Confidence must reflect uncertainty.
+
+Do not give 0.99 confidence unless evidence is extremely strong.
+
+Return ONLY valid JSON.
+
+Required structure:
+
+{
+  "verdict": "TRUE",
+  "confidence": 0.90,
+  "evidenceAgreement": 0.85,
+  "sourceQuality": 0.80,
+  "reason": "Short evidence-based explanation",
+  "contradictoryEvidence": []
+}
+""";
+
+
+            /*
+             * =====================================================
+             * PAYLOAD
+             * =====================================================
+             */
+
+            var payload =
+                new
+                {
+                    mode,
+
+                    layer2 = new
+                    {
+                        verdict = layer2.Verdict,
+                        confidence = layer2.Confidence,
+                        reason = layer2.Reason,
+
+                        providers =
+                            layer2.Providers
+                                .Select(x => new
+                                {
+                                    provider = x.Provider,
+                                    success = x.Success,
+                                    verdict = x.Verdict,
+                                    confidence = x.Confidence,
+                                    message = x.Message
+                                })
+                                .ToList()
+                    },
+
+                    layer3 = new
+                    {
+                        verdict = layer3.Verdict,
+                        confidence = layer3.Confidence,
+                        reason = layer3.Reason
+                    },
+
+                    evidence,
+
+                    sources
+                };
+
+
+            /*
+             * =====================================================
+             * GROQ VISION REQUEST
+             * =====================================================
+             *
+             * OpenAI-compatible multimodal format:
+             *
+             * messages
+             *   system
+             *   user
+             *      text
+             *      image_url
+             */
+
+            var requestBody =
+                new
+                {
+                    model = GroqVisionModel,
+
+                    messages =
+                        new object[]
+                        {
+                            new
+                            {
+                                role = "system",
+                                content = systemPrompt
+                            },
+
+                            new
+                            {
+                                role = "user",
+
+                                content =
+                                    new object[]
+                                    {
+                                        new
+                                        {
+                                            type = "text",
+
+                                            text =
+                                                JsonSerializer.Serialize(
+                                                    payload
+                                                )
+                                        },
+
+                                        new
+                                        {
+                                            type = "image_url",
+
+                                            image_url =
+                                                new
+                                                {
+                                                    url =
+                                                        $"data:{mimeType};base64,{imageBase64}"
+                                                }
+                                        }
+                                    }
+                            }
+                        },
+
+                    temperature = 0.1,
+
+                    max_completion_tokens = 700,
+
+                    response_format =
+                        new
+                        {
+                            type = "json_object"
+                        }
+                };
+
+
+            var json =
+                JsonSerializer.Serialize(
+                    requestBody
+                );
+
+
+            using var request =
+                new HttpRequestMessage(
+                    HttpMethod.Post,
+                    "https://api.groq.com/openai/v1/chat/completions"
+                );
+
+
+            request.Headers.Authorization =
+                new AuthenticationHeaderValue(
+                    "Bearer",
+                    apiKey
+                );
+
+
+            request.Content =
+                new StringContent(
+                    json,
+                    Encoding.UTF8,
+                    "application/json"
+                );
+
+
+            using var response =
+                await client.SendAsync(
+                    request
+                );
+
+
+            var body =
+                await response.Content
+                    .ReadAsStringAsync();
+
+
+            if (response.StatusCode ==
+                HttpStatusCode.TooManyRequests)
+            {
+                return null;
+            }
+
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception(
+                    $"Groq Vision HTTP {(int)response.StatusCode} ({response.StatusCode}): {body}"
+                );
+            }
+
+
+            using var document =
+                JsonDocument.Parse(
+                    body
+                );
+
+
+            var root =
+                document.RootElement;
+
+
+            if (!root.TryGetProperty(
+                    "choices",
+                    out var choices) ||
+                choices.ValueKind !=
+                    JsonValueKind.Array ||
+                choices.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+
+            var output =
+                choices[0]
+                    .GetProperty("message")
+                    .GetProperty("content")
+                    .GetString();
+
+
+            if (string.IsNullOrWhiteSpace(output))
+                return null;
+
+
+            var result =
+                JsonSerializer.Deserialize<GroqAnalysis>(
+                    output,
+                    new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    }
+                );
+
+
+            if (result == null)
+                return null;
+
+
+            result.Model =
+                GroqVisionModel;
+
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            throw new Exception(
+                $"Groq Vision request failed: {ex.GetType().Name}: {ex.Message}",
+                ex
+            );
+        }
+    }
+
+
+    /*
+     * =============================================================
+     * GEMINI IMAGE
+     * =============================================================
+     *
+     * EXPERT / PRO ONLY.
+     */
+
+    private async Task<GeminiAnalysis?>
+        TryGeminiImageAsync(
+            string apiKey,
+            string model,
+            string mode,
+            string mimeType,
+            string imageBase64,
+            Layer2VerificationResult layer2,
+            Layer4Layer3Input layer3,
+            List<EvidenceItem> evidence,
+            List<Layer4Source> sources)
+    {
+        try
+        {
+            var client =
+                _httpClientFactory.CreateClient();
+
+            client.Timeout =
+                TimeSpan.FromSeconds(90);
+
+
+            var systemPrompt = """
+You are Layer 4 of StudentHub AI Trust.
+
+You are the FINAL verification model for an IMAGE.
+
+You can directly inspect the supplied image.
+
+Determine whether the image should be classified as:
+
+TRUE
+FAKE
+MISLEADING
+UNKNOWN
+
+For image verification, analyze:
+
+1. Whether the image appears AI-generated.
+2. Whether the image appears manipulated or deepfaked.
+3. Visible inconsistencies, artifacts, impossible geometry,
+   duplicated details, unnatural faces, hands, text, lighting,
+   shadows, reflections, anatomy, or compositing.
+4. The Layer 2 provider result.
+5. Layer 3 external evidence.
+6. Agreement and contradictions between evidence.
+
+IMPORTANT:
+
+Sightengine is evidence, not absolute truth.
+
+Do NOT blindly follow Layer 2.
+
+Do NOT blindly follow Layer 3.
+
+Do NOT invent facts.
+
+Do NOT invent sources.
+
+Do NOT invent URLs.
+
+If the visual evidence is insufficient, return UNKNOWN.
+
+Return ONLY valid JSON.
+
+Required structure:
+
+{
+  "verdict": "TRUE",
+  "confidence": 0.95,
+  "evidenceAgreement": 0.90,
+  "sourceQuality": 0.80,
+  "reason": "Short evidence-based explanation",
+  "contradictoryEvidence": [],
+  "sources": []
+}
+
+The sources field must ONLY contain URLs supplied in the input.
+
+For an image:
+
+TRUE means there is no strong evidence that the image is manipulated
+or falsely represented.
+
+FAKE means strong evidence indicates the image is AI-generated,
+deepfaked, or materially manipulated.
+
+MISLEADING means the image itself may be real or manipulated
+but its available context/evidence makes the presented
+interpretation misleading.
+
+UNKNOWN means evidence is insufficient or contradictory.
+""";
+
+
+            var payload =
+                new
+                {
+                    mode,
+
+                    layer2 = new
+                    {
+                        verdict = layer2.Verdict,
+                        confidence = layer2.Confidence,
+                        reason = layer2.Reason,
+
+                        providers =
+                            layer2.Providers
+                                .Select(x => new
+                                {
+                                    provider = x.Provider,
+                                    success = x.Success,
+                                    verdict = x.Verdict,
+                                    confidence = x.Confidence,
+                                    message = x.Message
+                                })
+                                .ToList()
+                    },
+
+                    layer3 = new
+                    {
+                        verdict = layer3.Verdict,
+                        confidence = layer3.Confidence,
+                        reason = layer3.Reason
+                    },
+
+                    evidence,
+
+                    sources
+                };
+
+
+            var textPart =
+                systemPrompt +
+                "\n\nINPUT:\n" +
+                JsonSerializer.Serialize(
+                    payload
+                );
+
+
+            var requestBody =
+                new
+                {
+                    contents =
+                        new[]
+                        {
+                            new
+                            {
+                                role = "user",
+
+                                parts =
+                                    new object[]
+                                    {
+                                        new
+                                        {
+                                            text = textPart
+                                        },
+
+                                        new
+                                        {
+                                            inlineData =
+                                                new
+                                                {
+                                                    mimeType,
+                                                    data = imageBase64
+                                                }
+                                        }
+                                    }
+                            }
+                        },
+
+                    generationConfig =
+                        new
+                        {
+                            temperature = 0.1,
+
+                            responseMimeType =
+                                "application/json"
+                        }
+                };
+
+
+            var json =
+                JsonSerializer.Serialize(
+                    requestBody
+                );
+
+
+            using var request =
+                new HttpRequestMessage(
+                    HttpMethod.Post,
+                    $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+                );
+
+
+            request.Headers.Add(
+                "x-goog-api-key",
+                apiKey
+            );
+
+
+            request.Content =
+                new StringContent(
+                    json,
+                    Encoding.UTF8,
+                    "application/json"
+                );
+
+
+            using var response =
+                await client.SendAsync(
+                    request
+                );
+
+
+            var responseBody =
+                await response.Content
+                    .ReadAsStringAsync();
+
+
+            if (response.StatusCode ==
+                HttpStatusCode.TooManyRequests)
+            {
+                return null;
+            }
+
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+
+            using var document =
+                JsonDocument.Parse(
+                    responseBody
+                );
+
+
+            var root =
+                document.RootElement;
+
+
+            if (!root.TryGetProperty(
+                    "candidates",
+                    out var candidates) ||
+                candidates.ValueKind !=
+                    JsonValueKind.Array ||
+                candidates.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+
+            var text =
+                candidates[0]
+                    .GetProperty("content")
+                    .GetProperty("parts")[0]
+                    .GetProperty("text")
+                    .GetString();
+
+
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+
+            var result =
+                JsonSerializer.Deserialize<GeminiAnalysis>(
+                    text,
+                    new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    }
+                );
+
+
+            if (result == null)
+                return null;
+
+
+            result.Model =
+                model;
+
+
+            return result;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+
+    /*
+     * =============================================================
      * RESULT
      * =============================================================
      */
@@ -1067,7 +2001,13 @@ Return ONLY JSON.
 
 
         /*
-         * Backend quy?t d?nh STOP.
+         * Backend quyết định STOP.
+         *
+         * Điều kiện:
+         *
+         * verdict != UNKNOWN
+         * confidence >= 0.90
+         * evidenceAgreement >= 0.85
          */
 
         var stop =
@@ -1115,10 +2055,8 @@ Return ONLY JSON.
                 "pro" => "pro",
 
                 /*
-                 * Gi? tuong thích v?i request cu.
-                 *
-                 * N?u frontend chua g?i mode:
-                 * m?c d?nh user d? không vô tình dùng Gemini.
+                 * Nếu frontend chưa gửi mode:
+                 * mặc định USER để không vô tình gọi Gemini.
                  */
 
                 _ => "user"
@@ -1267,6 +2205,3 @@ Return ONLY JSON.
         public string Model { get; set; } = "";
     }
 }
-
-
-

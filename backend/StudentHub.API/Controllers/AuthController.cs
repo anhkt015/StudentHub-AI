@@ -1,4 +1,4 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -148,6 +148,7 @@ public class AuthController : ControllerBase
             user.SupabaseUserId,
             user.Email,
             user.FullName,
+                        user.AvatarUrl,
             user.Role,
             user.TrustScore,
             user.UniversityEmailVerified,

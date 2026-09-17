@@ -5,8 +5,10 @@ public record UserResponseDto(
     string SupabaseUserId,
     string Email,
     string FullName,
+    string? AvatarUrl,
     string Role,
     int TrustScore,
     bool UniversityEmailVerified,
     DateTime CreatedAt
 );
+

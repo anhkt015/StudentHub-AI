@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -8,6 +9,10 @@ public interface ILayer3VerificationService
     Task<Layer3VerificationResult> VerifyAsync(
         string type,
         string content);
+
+    Task<Layer3VerificationResult> VerifyImageAsync(
+        IFormFile image,
+        Layer2VerificationResult layer2);
 }
 
 public record Layer3VerificationResult(

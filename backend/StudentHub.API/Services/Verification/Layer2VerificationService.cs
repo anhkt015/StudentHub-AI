@@ -1,4 +1,6 @@
-﻿using System.Net.Http.Json;
+﻿using Microsoft.AspNetCore.Http;
+using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Text.Json;
 
 namespace StudentHub.API.Services.Verification;
@@ -40,9 +42,8 @@ public class Layer2VerificationService : ILayer2VerificationService
         {
             "url" => await VerifyUrlWithGoogleSafeBrowsingAsync(content),
             "text" => await VerifyTextWithGoogleFactCheckAsync(content),
-            "image" => Unknown(
-                "Image verification is not implemented yet.",
-                "Layer 2 Image"),
+            "image" => throw new InvalidOperationException(
+                "Image verification must use VerifyImageAsync(IFormFile)."),
             _ => Unknown(
                 $"Unsupported Layer 2 verification type: {type}",
                 "Layer 2")
@@ -428,6 +429,375 @@ public class Layer2VerificationService : ILayer2VerificationService
     }
 
     // ============================================================
+
+    // ============================================================
+    // LAYER 2 - IMAGE
+    // Sightengine: genai + deepfake
+    //
+    // genai    = AI-generated / AI-edited image probability
+    // deepfake = face swap / face manipulation probability
+    //
+    // Layer 2 KHONG ket luan contentFake / dangerous.
+    // Layer 3 + Layer 4 se xu ly tiep.
+    // ============================================================
+
+    public async Task<Layer2VerificationResult> VerifyImageAsync(
+        IFormFile image)
+    {
+        const long MaxFileSize = 10 * 1024 * 1024;
+
+        if (image == null || image.Length == 0)
+        {
+            return Unknown(
+                "Image file is required.",
+                "Sightengine Image");
+        }
+
+        if (image.Length > MaxFileSize)
+        {
+            return Unknown(
+                "Image file exceeds the 10 MB limit.",
+                "Sightengine Image");
+        }
+
+        var allowedContentTypes = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+        };
+
+        if (!allowedContentTypes.Contains(image.ContentType))
+        {
+            return Unknown(
+                "Unsupported image format. Only JPG, JPEG, PNG and WEBP are allowed.",
+                "Sightengine Image");
+        }
+
+        var apiUser =
+            _configuration["Sightengine:ApiUser"];
+
+        var apiSecret =
+            _configuration["Sightengine:ApiSecret"];
+
+        if (string.IsNullOrWhiteSpace(apiUser) ||
+            string.IsNullOrWhiteSpace(apiSecret))
+        {
+            return Unknown(
+                "Sightengine API credentials are not configured.",
+                "Sightengine Image");
+        }
+
+        try
+        {
+            var client =
+                _httpClientFactory.CreateClient();
+
+            using var form =
+                new MultipartFormDataContent();
+
+            form.Add(
+                new StringContent("genai,deepfake"),
+                "models");
+
+            form.Add(
+                new StringContent(apiUser),
+                "api_user");
+
+            form.Add(
+                new StringContent(apiSecret),
+                "api_secret");
+
+            await using var stream =
+                image.OpenReadStream();
+
+            using var fileContent =
+                new StreamContent(stream);
+
+            fileContent.Headers.ContentType =
+                new MediaTypeHeaderValue(
+                    image.ContentType);
+
+            form.Add(
+                fileContent,
+                "media",
+                image.FileName);
+
+            var response =
+                await client.PostAsync(
+                    "https://api.sightengine.com/1.0/check.json",
+                    form);
+
+            var rawJson =
+                await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new Layer2VerificationResult(
+                    "UNKNOWN",
+                    0.0,
+                    "Sightengine image verification request failed.",
+                    new List<Layer2ProviderResult>
+                    {
+                        new(
+                            "Sightengine",
+                            false,
+                            "UNKNOWN",
+                            0.0,
+                            rawJson)
+                    });
+            }
+
+            using var document =
+                JsonDocument.Parse(rawJson);
+
+            var root =
+                document.RootElement;
+
+            if (!root.TryGetProperty(
+                    "type",
+                    out var typeElement))
+            {
+                return new Layer2VerificationResult(
+                    "UNKNOWN",
+                    0.0,
+                    "Sightengine returned no image detection result.",
+                    new List<Layer2ProviderResult>
+                    {
+                        new(
+                            "Sightengine",
+                            true,
+                            "UNKNOWN",
+                            0.0,
+                            rawJson)
+                    });
+            }
+
+            double aiScore = 0.0;
+            double deepfakeScore = 0.0;
+
+            if (typeElement.TryGetProperty(
+                    "ai_generated",
+                    out var aiElement) &&
+                aiElement.ValueKind == JsonValueKind.Number)
+            {
+                aiScore =
+                    aiElement.GetDouble();
+            }
+
+            if (typeElement.TryGetProperty(
+                    "deepfake",
+                    out var deepfakeElement) &&
+                deepfakeElement.ValueKind == JsonValueKind.Number)
+            {
+                deepfakeScore =
+                    deepfakeElement.GetDouble();
+            }
+
+            string? requestId = null;
+
+            if (root.TryGetProperty(
+                    "request",
+                    out var requestElement) &&
+                requestElement.TryGetProperty(
+                    "id",
+                    out var requestIdElement))
+            {
+                requestId =
+                    requestIdElement.GetString();
+            }
+
+            // ----------------------------------------------------
+            // Per-generator scores
+            // Chỉ lấy generator có score >= 0.50
+            // ----------------------------------------------------
+
+            var generatorSignals =
+                new List<string>();
+
+            if (typeElement.TryGetProperty(
+                    "ai_generators",
+                    out var generators) &&
+                generators.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in
+                    generators.EnumerateObject())
+                {
+                    if (property.Value.ValueKind !=
+                        JsonValueKind.Number)
+                    {
+                        continue;
+                    }
+
+                    var score =
+                        property.Value.GetDouble();
+
+                    if (score >= 0.50)
+                    {
+                        generatorSignals.Add(
+                            $"Generator {property.Name}: {score:0.00}");
+                    }
+                }
+            }
+
+            var signals =
+                new List<string>();
+
+            if (aiScore >= 0.80)
+            {
+                signals.Add(
+                    $"High AI-generation probability ({aiScore:0.00}).");
+            }
+            else if (aiScore > 0.50)
+            {
+                signals.Add(
+                    $"Moderate AI-generation probability ({aiScore:0.00}).");
+            }
+
+            if (deepfakeScore >= 0.80)
+            {
+                signals.Add(
+                    $"High deepfake probability ({deepfakeScore:0.00}).");
+            }
+            else if (deepfakeScore > 0.50)
+            {
+                signals.Add(
+                    $"Moderate deepfake probability ({deepfakeScore:0.00}).");
+            }
+
+            signals.AddRange(generatorSignals);
+
+            // ----------------------------------------------------
+            // Layer 2 verdict
+            // ----------------------------------------------------
+
+            string verdict;
+            double confidence;
+            string reason;
+
+            if (aiScore >= 0.80)
+            {
+                verdict =
+                    "LIKELY_AI_GENERATED";
+
+                confidence =
+                    aiScore;
+
+                reason =
+                    "Sightengine detected a high probability that the image was generated or edited by generative AI.";
+            }
+            else if (deepfakeScore >= 0.80)
+            {
+                verdict =
+                    "LIKELY_DEEPFAKE";
+
+                confidence =
+                    deepfakeScore;
+
+                reason =
+                    "Sightengine detected a high probability of face manipulation or face swapping.";
+            }
+            else if (aiScore <= 0.20 &&
+                     deepfakeScore <= 0.20)
+            {
+                verdict =
+                    "LIKELY_REAL";
+
+                confidence =
+                    1.0 - Math.Max(
+                        aiScore,
+                        deepfakeScore);
+
+                reason =
+                    "Sightengine found no strong signal of generative AI or deepfake manipulation.";
+            }
+            else
+            {
+                verdict =
+                    "UNCERTAIN";
+
+                confidence =
+                    Math.Max(
+                        aiScore,
+                        deepfakeScore);
+
+                reason =
+                    "Sightengine did not provide a sufficiently strong signal for a reliable classification.";
+            }
+
+            var combinedReason =
+                reason;
+
+            if (signals.Count > 0)
+            {
+                combinedReason +=
+                    " Signals: " +
+                    string.Join(
+                        " ",
+                        signals);
+            }
+
+            if (!string.IsNullOrWhiteSpace(requestId))
+            {
+                combinedReason +=
+                    $" Sightengine request ID: {requestId}.";
+            }
+
+            return new Layer2VerificationResult(
+                verdict,
+                Math.Clamp(confidence, 0.0, 1.0),
+                combinedReason,
+                new List<Layer2ProviderResult>
+                {
+                    new(
+                        "Sightengine GenAI",
+                        true,
+                        aiScore >= 0.80
+                            ? "LIKELY_AI_GENERATED"
+                            : aiScore <= 0.20
+                                ? "LIKELY_REAL"
+                                : "UNCERTAIN",
+                        aiScore >= 0.80
+                            ? aiScore
+                            : 1.0 - aiScore,
+                        $"AI-generated score: {aiScore:0.000}" +
+                        (generatorSignals.Count > 0
+                            ? $" | {string.Join(", ", generatorSignals)}"
+                            : ""))
+                    ,
+                    new(
+                        "Sightengine Deepfake",
+                        true,
+                        deepfakeScore >= 0.80
+                            ? "LIKELY_DEEPFAKE"
+                            : deepfakeScore <= 0.20
+                                ? "LIKELY_REAL"
+                                : "UNCERTAIN",
+                        deepfakeScore >= 0.80
+                            ? deepfakeScore
+                            : 1.0 - deepfakeScore,
+                        $"Deepfake score: {deepfakeScore:0.000}")
+                });
+        }
+        catch (Exception ex)
+        {
+            return new Layer2VerificationResult(
+                "UNKNOWN",
+                0.0,
+                "Sightengine image verification failed.",
+                new List<Layer2ProviderResult>
+                {
+                    new(
+                        "Sightengine",
+                        false,
+                        "UNKNOWN",
+                        0.0,
+                        ex.Message)
+                });
+        }
+    }
+
     // Helpers
     // ============================================================
 
@@ -511,3 +881,4 @@ public class Layer2VerificationService : ILayer2VerificationService
             });
     }
 }
+

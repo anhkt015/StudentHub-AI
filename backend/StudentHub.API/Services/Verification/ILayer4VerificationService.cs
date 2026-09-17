@@ -1,4 +1,8 @@
-﻿namespace StudentHub.API.Services.Verification;
+using Microsoft.AspNetCore.Http;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace StudentHub.API.Services.Verification;
 
 public interface ILayer4VerificationService
 {
@@ -6,6 +10,12 @@ public interface ILayer4VerificationService
         string type,
         string content,
         string mode,
+        Layer4Layer3Input layer3);
+
+    Task<Layer4VerificationResult> VerifyImageAsync(
+        IFormFile image,
+        string mode,
+        Layer2VerificationResult layer2,
         Layer4Layer3Input layer3);
 }
 

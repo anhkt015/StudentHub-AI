@@ -1,3 +1,4 @@
+﻿using Microsoft.AspNetCore.Http;
 namespace StudentHub.API.Services.Verification;
 
 public interface ILayer2VerificationService
@@ -5,6 +6,8 @@ public interface ILayer2VerificationService
     Task<Layer2VerificationResult> VerifyAsync(
         string type,
         string content);
+
+    Task<Layer2VerificationResult> VerifyImageAsync(IFormFile image);
 }
 
 public record Layer2VerificationResult(
