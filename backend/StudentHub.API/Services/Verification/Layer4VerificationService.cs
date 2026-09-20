@@ -1948,6 +1948,14 @@ UNKNOWN means evidence is insufficient or contradictory.
 
         var finalSourceQuality =
             Clamp(sourceQuality);
+        // Nếu AI đã có kết luận rõ ràng và confidence cao,
+        // không để evidenceAgreement quá thấp làm chặn kết quả.
+        if (normalizedVerdict != "UNKNOWN" &&
+            finalConfidence >= 0.90 &&
+            finalAgreement < 0.50)
+        {
+            finalAgreement = 0.85;
+        }
 
 
         /*
