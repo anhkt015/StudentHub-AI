@@ -755,13 +755,13 @@ The sources field must ONLY contain URLs supplied in the input.
      */
 
     private async Task<GroqAnalysis?>
-        TryGroqAsync(
-            string apiKey,
-            string type,
-            string claim,
-            Layer4Layer3Input layer3,
-            List<EvidenceItem> evidence,
-            List<Layer4Source> sources)
+     TryGroqAsync(
+         string apiKey,
+         string type,
+         string claim,
+         Layer4Layer3Input layer3,
+         List<EvidenceItem> evidence,
+         List<Layer4Source> sources)
     {
         try
         {
@@ -771,71 +771,40 @@ The sources field must ONLY contain URLs supplied in the input.
             client.Timeout =
                 TimeSpan.FromSeconds(45);
 
-
             var systemPrompt = """
-You are Layer 4 of StudentHub AI Trust.
+You are the final verification model of StudentHub AI Trust.
 
-You are the final verification model.
-
-Independently evaluate the user's claim using:
+Evaluate the user's claim using ONLY:
 1. Layer 3 result
 2. Layer 3 evidence
-3. Additional Layer 4 web research
+3. Layer 4 web research
 
-Layer 3 is NOT automatically correct.
+Do not invent facts, sources, or URLs.
+Do not claim to browse the internet yourself.
 
-If Layer 3 says UNKNOWN, you MUST still analyze the supplied
-Layer 3 evidence and Layer 4 research.
+Choose exactly one verdict:
+TRUE, FAKE, MISLEADING, UNKNOWN.
 
-Do NOT simply repeat Layer 3.
+TRUE = strong evidence supports the claim.
+FAKE = strong evidence contradicts the claim.
+MISLEADING = partly true, exaggerated, incomplete, or misleading.
+UNKNOWN = insufficient or contradictory evidence.
 
-Do NOT invent facts.
+Return ONLY valid JSON.
+Do not use markdown.
+Keep "reason" under 60 words.
+Keep "contradictoryEvidence" to at most 3 short items.
 
-Do NOT invent sources.
-
-Do NOT invent URLs.
-
-Do NOT claim to have browsed the internet yourself.
-
-Use ONLY the supplied evidence.
-
-Verdicts:
-
-TRUE
-FAKE
-MISLEADING
-UNKNOWN
-
-TRUE:
-Strong evidence supports the claim.
-
-FAKE:
-Strong evidence contradicts the claim.
-
-MISLEADING:
-The claim is partly true, exaggerated, incomplete,
-or misleadingly worded.
-
-UNKNOWN:
-Evidence is insufficient or genuinely contradictory.
-
-Absolute wording such as:
-always, never, exactly, guaranteed, 100%
-
-requires especially strong evidence.
-
-Return ONLY JSON.
-
+Required JSON:
 {
-  "verdict": "TRUE",
-  "confidence": 0.95,
-  "evidenceAgreement": 0.92,
-  "sourceQuality": 0.90,
+  "verdict": "UNKNOWN",
+  "confidence": 0.0,
+  "evidenceAgreement": 0.0,
+  "sourceQuality": 0.0,
   "reason": "Short explanation",
   "contradictoryEvidence": []
 }
 """;
-
 
             var payload =
                 new
@@ -847,14 +816,28 @@ Return ONLY JSON.
                     {
                         verdict = layer3.Verdict,
                         confidence = layer3.Confidence,
-                        reason = layer3.Reason
+                        reason = LimitText(layer3.Reason, 800)
                     },
 
-                    evidence,
+                    evidence = evidence
+                        .Take(8)
+                        .Select(x => new
+                        {
+                            title = LimitText(x.Title, 200),
+                            url = x.Url,
+                            content = LimitText(x.Content, 700)
+                        })
+                        .ToList(),
 
-                    sources
+                    sources = sources
+                        .Take(10)
+                        .Select(x => new
+                        {
+                            title = LimitText(x.Title, 200),
+                            url = x.Url
+                        })
+                        .ToList()
                 };
-
 
             var requestBody =
                 new
@@ -864,25 +847,24 @@ Return ONLY JSON.
                     messages =
                         new object[]
                         {
-                            new
-                            {
-                                role = "system",
-                                content = systemPrompt
-                            },
+                        new
+                        {
+                            role = "system",
+                            content = systemPrompt
+                        },
 
-                            new
-                            {
-                                role = "user",
-                                content =
-                                    JsonSerializer.Serialize(
-                                        payload
-                                    )
-                            }
+                        new
+                        {
+                            role = "user",
+                            content =
+                                JsonSerializer.Serialize(payload)
+                        }
                         },
 
                     temperature = 0.1,
 
-                    max_completion_tokens = 700,
+                    // Tăng từ 700 để model có đủ chỗ hoàn thành JSON.
+                    max_completion_tokens = 1200,
 
                     response_format =
                         new
@@ -891,12 +873,8 @@ Return ONLY JSON.
                         }
                 };
 
-
             var json =
-                JsonSerializer.Serialize(
-                    requestBody
-                );
-
+                JsonSerializer.Serialize(requestBody);
 
             using var request =
                 new HttpRequestMessage(
@@ -904,13 +882,11 @@ Return ONLY JSON.
                     "https://api.groq.com/openai/v1/chat/completions"
                 );
 
-
             request.Headers.Authorization =
                 new AuthenticationHeaderValue(
                     "Bearer",
                     apiKey
                 );
-
 
             request.Content =
                 new StringContent(
@@ -919,39 +895,23 @@ Return ONLY JSON.
                     "application/json"
                 );
 
-
             using var response =
-                await client.SendAsync(
-                    request
-                );
-
+                await client.SendAsync(request);
 
             var body =
                 await response.Content.ReadAsStringAsync();
 
-
-            if (response.StatusCode ==
-                HttpStatusCode.TooManyRequests)
+            // Không để Groq lỗi làm chết toàn bộ Layer 4.
+            if (!response.IsSuccessStatusCode)
             {
                 return null;
             }
 
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new Exception(
-                    $"Groq HTTP {(int)response.StatusCode} ({response.StatusCode}): {body}"
-                );
-            }
-
-
             using var document =
                 JsonDocument.Parse(body);
 
-
             var root =
                 document.RootElement;
-
 
             if (!root.TryGetProperty(
                     "choices",
@@ -963,17 +923,14 @@ Return ONLY JSON.
                 return null;
             }
 
-
             var output =
                 choices[0]
                     .GetProperty("message")
                     .GetProperty("content")
                     .GetString();
 
-
             if (string.IsNullOrWhiteSpace(output))
                 return null;
-
 
             var result =
                 JsonSerializer.Deserialize<GroqAnalysis>(
@@ -984,26 +941,19 @@ Return ONLY JSON.
                     }
                 );
 
-
             if (result == null)
                 return null;
-
 
             result.Model =
                 GroqModel;
 
-
             return result;
         }
-        catch (Exception ex)
+        catch
         {
-            throw new Exception(
-                $"Groq request failed: {ex.GetType().Name}: {ex.Message}",
-                ex
-            );
+            return null;
         }
     }
-
 
     /*
      * =============================================================
